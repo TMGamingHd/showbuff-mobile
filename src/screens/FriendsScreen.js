@@ -162,6 +162,12 @@ const FriendsScreen = ({ navigation }) => {
       </View>
       <View style={styles.friendActions}>
         <TouchableOpacity
+          style={styles.profileButton}
+          onPress={() => navigation.navigate('FriendProfile', { friend })}
+        >
+          <Ionicons name="person-outline" size={20} color="#3B82F6" />
+        </TouchableOpacity>
+        <TouchableOpacity
           style={styles.messageButton}
           onPress={() => openChat(friend)}
         >
@@ -545,6 +551,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  profileButton: {
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#EFF6FF',
   },
   messageButton: {
     padding: 10,

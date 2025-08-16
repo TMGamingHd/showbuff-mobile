@@ -27,6 +27,7 @@ import ReviewWriteScreen from './src/screens/ReviewWriteScreen';
 import WatchlistScreen from './src/screens/WatchlistScreen';
 import MovieDetailScreen from './src/screens/MovieDetailScreen';
 import FriendsScreen from './src/screens/FriendsScreen';
+import FriendProfileScreen from './src/screens/FriendProfileScreen';
 import ChatScreen from './src/screens/ChatScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 import MovieShareScreen from './src/screens/MovieShareScreen';
@@ -625,6 +626,11 @@ const MainApp = () => {
             options={{ 
               headerShown: false 
             }} 
+          />
+          <Stack.Screen 
+            name="FriendProfile" 
+            component={FriendProfileScreen}
+            options={{ headerShown: false }}
           />
           <Stack.Screen 
             name="Chat" 

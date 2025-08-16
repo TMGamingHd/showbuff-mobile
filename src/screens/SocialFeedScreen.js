@@ -15,9 +15,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApp } from '../contexts/AppContext';
 import { useAuth } from '../contexts/AuthContext';
 import TMDBService from '../services/tmdb';
+import { dbToClient, listLabel } from '../utils/lists';
+import { showToast } from '../utils/toast';
+import { showMoveDialog } from '../utils/moveDialog';
 
 const SocialFeedScreen = ({ navigation }) => {
-  const { friends, activity, refreshData, addToList, isInList, unreadMessageCount, loadNotifications } = useApp();
+  const { friends, activity, refreshData, addToList, moveToList, isInList, unreadMessageCount, loadNotifications } = useApp();
   const { user } = useAuth();
   const [socialFeed, setSocialFeed] = useState([]);
   const [trendingMovies, setTrendingMovies] = useState([]);
@@ -117,6 +120,78 @@ const SocialFeedScreen = ({ navigation }) => {
     navigation.navigate('MovieDetail', { movie });
   };
 
+  const handleTrendingMovieActions = (movie) => {
+    const handleAddWithConflict = async (targetList) => {
+      const result = await addToList(movie, targetList);
+      if (result.success) {
+        showToast(`Added to ${listLabel(targetList)}!`);
+        return;
+      }
+      if (result.status === 409 && result.existingList) {
+        const existingClientList = dbToClient(result.existingList);
+        if (existingClientList === targetList) {
+          showToast(`Already in ${listLabel(targetList)}`);
+          return;
+        }
+        showMoveDialog({
+          movie,
+          existingList: existingClientList,
+          targetList,
+          onMove: async () => {
+            const moveRes = await moveToList(movie.id, existingClientList, targetList);
+            if (moveRes.success) {
+              showToast(`Moved to ${listLabel(targetList)}.`);
+            } else {
+              Alert.alert('Error', moveRes.error || 'Failed to move movie');
+            }
+          },
+        });
+        return;
+      }
+      Alert.alert('Error', result.error || 'Failed to add to list');
+    };
+
+    const actions = [
+      {
+        text: 'Add to Watchlist',
+        onPress: async () => {
+          if (isInList(movie.id, 'watchlist')) {
+            showToast('Already in Watchlist');
+            return;
+          }
+          await handleAddWithConflict('watchlist');
+        }
+      },
+      {
+        text: 'Add to Currently Watching',
+        onPress: async () => {
+          if (isInList(movie.id, 'currently_watching')) {
+            showToast('Already in Currently Watching');
+            return;
+          }
+          await handleAddWithConflict('currently_watching');
+        }
+      },
+      {
+        text: 'Mark as Watched',
+        onPress: async () => {
+          if (isInList(movie.id, 'watched')) {
+            showToast('Already in Watched');
+            return;
+          }
+          await handleAddWithConflict('watched');
+        }
+      },
+      { text: 'Cancel', style: 'cancel' }
+    ];
+
+    Alert.alert(
+      movie.title || movie.name,
+      `${movie.overview || 'No overview available.'}\n\nRating: ${TMDBService.formatVoteAverage(movie.vote_average)}/10\nRelease: ${TMDBService.getYear(movie.release_date || movie.first_air_date)}`,
+      actions
+    );
+  };
+
   const handleQuickReview = () => {
     navigation.navigate('ReviewWrite');
   };
@@ -202,6 +277,7 @@ const SocialFeedScreen = ({ navigation }) => {
       <TouchableOpacity 
         style={styles.trendingMovieCard} 
         onPress={() => handleMoviePress(item)}
+        onLongPress={() => handleTrendingMovieActions(item)}
         activeOpacity={0.8}
       >
         <Image 

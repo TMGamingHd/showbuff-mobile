@@ -39,13 +39,29 @@ const FriendSelectionModal = ({
   const handleShareWithFriend = async (friend) => {
     try {
       setSharing(true);
+      console.log('=== FRIEND SELECTION MODAL SHARE START ===');
+      console.log('Movie being shared:', movie);
+      console.log('Movie ID:', movie?.id);
+      console.log('Movie title:', movie?.title || movie?.name);
+      console.log('Friend:', friend);
+      console.log('Friend ID:', friend.id);
+      
       const result = await shareMovie(friend.id, movie);
       
+      console.log('=== FRIEND SELECTION MODAL SHARE RESULT ===');
+      console.log('Result:', result);
+      
       if (result.success) {
-        onFriendSelect(friend, movie);
-        onClose();
+        console.log('Share successful - calling onFriendSelect and onClose');
+        // Add a small delay to ensure the toast shows before modal closes
+        setTimeout(() => {
+          onFriendSelect(friend, movie);
+          onClose();
+        }, 100);
       } else {
         console.error('Failed to share movie:', result.error);
+        // Show error alert for better user feedback
+        alert(`Failed to share movie: ${result.error}`);
       }
     } catch (error) {
       console.error('Error sharing movie:', error);

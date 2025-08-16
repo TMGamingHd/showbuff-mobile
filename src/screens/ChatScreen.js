@@ -42,8 +42,9 @@ const ChatScreen = ({ route, navigation }) => {
 
   const loadConversation = async () => {
     try {
-      const conversation = await getConversation(friend.id);
-      setMessages(conversation.messages || []);
+      const data = await getConversation(friend.id);
+      const rows = Array.isArray(data) ? data : (data?.messages || []);
+      setMessages(rows);
     } catch (error) {
       console.error('Error loading conversation:', error);
     }
@@ -65,6 +66,7 @@ const ChatScreen = ({ route, navigation }) => {
           senderId: user.id,
           senderUsername: user.username,
           message: messageText,
+          text: messageText,
           messageType: 'text',
           createdAt: new Date().toISOString(),
         };
@@ -100,6 +102,7 @@ const ChatScreen = ({ route, navigation }) => {
               senderId: user.id,
               senderUsername: user.username,
               message: `Recommended: ${movie.title || movie.name}`,
+              text: `Recommended: ${movie.title || movie.name}`,
               messageType: 'movie_share',
               movieData: movie,
               createdAt: new Date().toISOString(),
@@ -145,6 +148,7 @@ const ChatScreen = ({ route, navigation }) => {
 
     const messageTime = new Date(message.createdAt);
     const timeString = messageTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const displayText = message.text ?? message.message ?? '';
 
     return (
       <View key={message.id || index} style={[
@@ -194,17 +198,17 @@ const ChatScreen = ({ route, navigation }) => {
               </TouchableOpacity>
               
               <Text style={[styles.movieShareMessage, { color: isOwnMessage ? "#FFFFFF" : "#1F2937" }]}>
-                {message.message}
+                {displayText}
               </Text>
-            </View>
-          ) : (
-            <Text style={[
-              styles.messageText,
-              isOwnMessage ? styles.ownMessageText : styles.otherMessageText
-            ]}>
-              {message.message}
-            </Text>
-          )}
+              </View>
+            ) : (
+              <Text style={[
+                styles.messageText,
+                isOwnMessage ? styles.ownMessageText : styles.otherMessageText
+              ]}>
+                {displayText}
+              </Text>
+            )}
         </View>
 
         {/* Avatar and timestamp */}

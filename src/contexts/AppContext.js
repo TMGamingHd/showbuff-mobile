@@ -42,6 +42,27 @@ export const AppProvider = ({ children }) => {
   const [lastSync, setLastSync] = useState(null);
   const [offlineMode, setOfflineMode] = useState(false);
 
+  // Activity logging helper function
+  const createActivity = (type, action, movie, additionalData = {}) => {
+    const newActivity = {
+      id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      type,
+      action,
+      movieId: movie?.id,
+      movieTitle: movie?.title || movie?.name,
+      moviePoster: movie?.poster_path,
+      userId: user?.id,
+      createdAt: new Date().toISOString(),
+      ...additionalData
+    };
+    
+    // Add to activity state (newest first)
+    setActivity(prev => [newActivity, ...prev].slice(0, 100)); // Keep only last 100 activities
+    
+    console.log('Created activity:', newActivity);
+    return newActivity;
+  };
+
   // Load user data when authenticated
   useEffect(() => {
     if (isAuthenticated && user) {
@@ -51,10 +72,12 @@ export const AppProvider = ({ children }) => {
     }
   }, [isAuthenticated, user]);
 
-  // Load cached data on app start
+  // Load cached data only after authentication to avoid cross-user/stale contamination
   useEffect(() => {
-    loadCachedData();
-  }, []);
+    if (isAuthenticated && user?.id) {
+      loadCachedData();
+    }
+  }, [isAuthenticated, user]);
 
   const loadCachedData = async () => {
     try {
@@ -63,10 +86,22 @@ export const AppProvider = ({ children }) => {
       const cachedWatched = await AsyncStorage.getItem('watched');
       const cachedReviews = await AsyncStorage.getItem('reviews');
       
-      if (cachedWatchlist) setWatchlist(JSON.parse(cachedWatchlist));
-      if (cachedCurrentlyWatching) setCurrentlyWatching(JSON.parse(cachedCurrentlyWatching));
-      if (cachedWatched) setWatched(JSON.parse(cachedWatched));
-      if (cachedReviews) setReviews(JSON.parse(cachedReviews));
+      const wl = cachedWatchlist ? JSON.parse(cachedWatchlist) : null;
+      const cw = cachedCurrentlyWatching ? JSON.parse(cachedCurrentlyWatching) : null;
+      const wd = cachedWatched ? JSON.parse(cachedWatched) : null;
+      const rv = cachedReviews ? JSON.parse(cachedReviews) : null;
+      
+      if (wl) setWatchlist(wl);
+      if (cw) setCurrentlyWatching(cw);
+      if (wd) setWatched(wd);
+      if (rv) setReviews(rv);
+      
+      console.log('[AppContext] Loaded cached lists:', {
+        watchlist: Array.isArray(wl) ? wl.length : 0,
+        currentlyWatching: Array.isArray(cw) ? cw.length : 0,
+        watched: Array.isArray(wd) ? wd.length : 0,
+        reviews: Array.isArray(rv) ? rv.length : 0,
+      });
     } catch (error) {
       console.error('Error loading cached data:', error);
     }
@@ -89,28 +124,17 @@ export const AppProvider = ({ children }) => {
   // Load data from AsyncStorage cache
   const loadFromCache = async () => {
     try {
-      const cachedData = await AsyncStorage.getItem('userData');
-      if (cachedData) {
-        return JSON.parse(cachedData);
-      }
-      return null;
+      // Proactively remove deprecated combined cache to prevent contamination
+      await AsyncStorage.removeItem('userData');
     } catch (error) {
-      console.error('Error loading from cache:', error);
-      return null;
+      console.warn('Failed to remove deprecated userData cache:', error);
     }
+    return null;
   };
   
   // Apply cached user data to state
-  const applyUserData = (data) => {
-    if (!data) return;
-    
-    if (data.watchlist) setWatchlist(data.watchlist);
-    if (data.currentlyWatching) setCurrentlyWatching(data.currentlyWatching);
-    if (data.watched) setWatched(data.watched);
-    if (data.reviews) setReviews(data.reviews);
-    if (data.friends) setFriends(data.friends);
-    if (data.friendRequests) setFriendRequests(data.friendRequests);
-    if (data.activity) setActivity(data.activity);
+  const applyUserData = () => {
+    // No-op: combined userData cache is deprecated
   };
   
   const loadUserData = async () => {
@@ -127,12 +151,8 @@ export const AppProvider = ({ children }) => {
         return;
       }
       
-      // Try to load from cache first for immediate display
-      const cachedData = await loadFromCache();
-      if (cachedData) {
-        console.log('Loaded data from cache');
-        applyUserData(cachedData);
-      }
+      // Clear deprecated combined cache key to avoid stale data usage
+      await AsyncStorage.removeItem('userData');
       
       console.log('Fetching fresh data from backend...');
       
@@ -152,10 +172,19 @@ export const AppProvider = ({ children }) => {
         console.log('- Reviews:', reviewsData?.length || 0);
         
         // Update state with fetched data
-        setWatchlist(Array.isArray(watchlistData) ? watchlistData : []);
-        setCurrentlyWatching(Array.isArray(currentlyWatchingData) ? currentlyWatchingData : []);
-        setWatched(Array.isArray(watchedData) ? watchedData : []);
+        const watchlistMovies = Array.isArray(watchlistData) ? watchlistData : [];
+        const currentlyWatchingMovies = Array.isArray(currentlyWatchingData) ? currentlyWatchingData : [];
+        const watchedMovies = Array.isArray(watchedData) ? watchedData : [];
+        
+        setWatchlist(watchlistMovies);
+        setCurrentlyWatching(currentlyWatchingMovies);
+        setWatched(watchedMovies);
         setReviews(Array.isArray(reviewsData) ? reviewsData : []);
+        
+        // Auto-refresh incomplete movie data after setting initial state
+        console.log('Auto-refreshing incomplete movie data...');
+        await refreshIncompleteMovieData(watchlistMovies, currentlyWatchingMovies, watchedMovies);
+        
       } catch (error) {
         console.error('Error fetching movie lists:', error);
         // Continue with other data fetching even if movie lists fail
@@ -194,7 +223,7 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  const clearUserData = () => {
+  const clearUserData = async () => {
     setWatchlist([]);
     setCurrentlyWatching([]);
     setWatched([]);
@@ -206,6 +235,20 @@ export const AppProvider = ({ children }) => {
     setUnreadMessageCount(0);
     setUnreadMessageCounts({});
     setError(null);
+    // Also clear any persisted cache for lists and deprecated combined key
+    try {
+      await AsyncStorage.multiRemove([
+        'watchlist',
+        'currentlyWatching',
+        'watched',
+        'reviews',
+        'userData',
+        'lastSync'
+      ]);
+      console.log('Cleared cached user data from AsyncStorage');
+    } catch (e) {
+      console.warn('Failed to clear cached user data from AsyncStorage:', e);
+    }
   };
 
   const refreshData = async () => {
@@ -233,6 +276,91 @@ export const AppProvider = ({ children }) => {
   const backendToClient = (listType) => {
     if (!listType) return 'watchlist';
     return String(listType).replace(/-/g, '_');
+  };
+
+  // Check if a movie is missing important TMDB details
+  const isMovieIncomplete = (movie) => {
+    if (!movie || !movie.id) return false;
+    // Check for missing key details that should be fetched from TMDB
+    return !movie.overview || 
+           !movie.vote_average || 
+           !movie.poster_path ||
+           !movie.release_date ||
+           !movie.genre_ids;
+  };
+
+  // Refresh incomplete movie data by fetching from TMDB
+  const refreshIncompleteMovieData = async (watchlistMovies, currentlyWatchingMovies, watchedMovies) => {
+    try {
+      const allMovies = [...watchlistMovies, ...currentlyWatchingMovies, ...watchedMovies];
+      const incompleteMovies = allMovies.filter(isMovieIncomplete);
+      
+      if (incompleteMovies.length === 0) {
+        console.log('All movies have complete data, no refresh needed');
+        return;
+      }
+      
+      console.log(`Refreshing ${incompleteMovies.length} incomplete movies from TMDB...`);
+      
+      // Batch fetch movie details from TMDB
+      const movieUpdatePromises = incompleteMovies.map(async (movie) => {
+        try {
+          console.log(`Fetching details for movie ID: ${movie.id}`);
+          const tmdbDetails = await TMDBService.getMovieDetails(movie.id);
+          
+          // Merge the TMDB data with existing movie data
+          return {
+            ...movie,
+            title: tmdbDetails.title || movie.title,
+            name: tmdbDetails.name || tmdbDetails.title || movie.name,
+            overview: tmdbDetails.overview || movie.overview,
+            poster_path: tmdbDetails.poster_path || movie.poster_path,
+            backdrop_path: tmdbDetails.backdrop_path || movie.backdrop_path,
+            vote_average: tmdbDetails.vote_average || movie.vote_average,
+            vote_count: tmdbDetails.vote_count || movie.vote_count,
+            release_date: tmdbDetails.release_date || movie.release_date,
+            first_air_date: tmdbDetails.first_air_date || movie.first_air_date,
+            genre_ids: tmdbDetails.genre_ids || movie.genre_ids,
+            genres: tmdbDetails.genres || movie.genres,
+            runtime: tmdbDetails.runtime || movie.runtime,
+            popularity: tmdbDetails.popularity || movie.popularity,
+            adult: tmdbDetails.adult !== undefined ? tmdbDetails.adult : movie.adult,
+            original_language: tmdbDetails.original_language || movie.original_language,
+            original_title: tmdbDetails.original_title || movie.original_title
+          };
+        } catch (error) {
+          console.error(`Failed to fetch details for movie ${movie.id}:`, error);
+          return movie; // Return original movie if fetch fails
+        }
+      });
+      
+      const updatedMovies = await Promise.all(movieUpdatePromises);
+      console.log(`Successfully refreshed ${updatedMovies.length} movies`);
+      
+      // Create lookup map of updated movies
+      const updatedMoviesMap = new Map(updatedMovies.map(movie => [movie.id, movie]));
+      
+      // Update each list with refreshed movie data
+      const updateMovieList = (movieList) => {
+        return movieList.map(movie => updatedMoviesMap.get(movie.id) || movie);
+      };
+      
+      const refreshedWatchlist = updateMovieList(watchlistMovies);
+      const refreshedCurrentlyWatching = updateMovieList(currentlyWatchingMovies);
+      const refreshedWatched = updateMovieList(watchedMovies);
+      
+      // Update state with refreshed data
+      setWatchlist(refreshedWatchlist);
+      setCurrentlyWatching(refreshedCurrentlyWatching);
+      setWatched(refreshedWatched);
+      
+      // Cache the updated data
+      await cacheUserData();
+      
+      console.log('Movie data refresh completed successfully');
+    } catch (error) {
+      console.error('Error refreshing incomplete movie data:', error);
+    }
   };
 
   // Helper functions for list management
@@ -301,28 +429,21 @@ export const AppProvider = ({ children }) => {
       
       if (result.success) {
         console.log('Add successful:', result);
-        // Cache updated data
-        await cacheUserData();
-        return { success: true };
+      
+      // Create activity log for successful add
+      const action = `added_to_${normalizedListType.replace('_', '')}`;
+      createActivity('list', action, movie);
+      
+      // Cache updated data
+      await cacheUserData();
+      return { success: true };
       } else {
         console.error('Backend returned error:', result);
         // Rollback on failure
         setWatchlist(originalLists.watchlist);
         setCurrentlyWatching(originalLists.currentlyWatching);
         setWatched(originalLists.watched);
-        
-        // If backend returned an existing list, convert it to client format
-        let clientExistingList = result.existingList;
-        if (clientExistingList) {
-          clientExistingList = backendToClient(clientExistingList);
-        }
-        
-        return { 
-          success: false, 
-          error: result.error,
-          status: result.status,
-          existingList: clientExistingList
-        };
+        return { success: false, error: result.error };
       }
     } catch (error) {
       console.error('Error adding to list, rolling back:', error);
@@ -371,9 +492,15 @@ export const AppProvider = ({ children }) => {
       }
 
       console.log('Remove successful:', result);
-      // Cache updated data
-      await cacheUserData();
-      return { success: true };
+    
+    // Create activity log for successful removal
+    const movieData = getMovieFromLists(movieId) || { id: movieId, title: 'Unknown Movie' };
+    const action = `removed_from_${normalizedListType.replace('_', '')}`;
+    createActivity('list', action, movieData);
+    
+    // Cache updated data
+    await cacheUserData();
+    return { success: true };
     } catch (error) {
       console.error('Error removing from list:', error);
       // Rollback on error
@@ -430,9 +557,14 @@ export const AppProvider = ({ children }) => {
       // Backend returns success: true on successful operations
       if (result && (result.success === true || result.status === 200)) {
         console.log('Move successful:', result);
-        // Cache updated data
-        await cacheUserData();
-        return { success: true };
+      
+      // Create activity log for successful move
+      const action = `moved_to_${normalizedToList.replace('_', '')}`;
+      createActivity('list', action, movieToMove);
+      
+      // Cache updated data
+      await cacheUserData();
+      return { success: true };
       } else {
         console.error('Backend returned error:', result);
         // Rollback on failure
@@ -465,32 +597,45 @@ export const AppProvider = ({ children }) => {
     }
 
     try {
+      console.log(`[AppContext] Raw reviewData received:`, reviewData);
+      console.log(`[AppContext] reviewData type:`, typeof reviewData);
+      
       // Support both old format (movieId, rating, comment) and new format (reviewData object)
       let requestData;
       if (typeof reviewData === 'object' && reviewData.movieId) {
-        // New enhanced review format
+        // New enhanced review format - ensure all values are clean primitives
         requestData = {
-          showId: reviewData.movieId,
-          movie: reviewData.movie,
-          rating: reviewData.rating,
-          comment: reviewData.comment,
-          tags: reviewData.tags || [],
-          isRewatched: reviewData.isRewatched || false,
-          containsSpoilers: reviewData.containsSpoilers || false,
-          visibility: reviewData.visibility || 'friends',
+          showId: Number(reviewData.movieId),
+          movie: {
+            id: reviewData.movie?.id,
+            title: reviewData.movie?.title || reviewData.movie?.name,
+            poster_path: reviewData.movie?.poster_path
+          },
+          rating: Number(reviewData.rating),
+          comment: String(reviewData.comment || '').trim(),
+          tags: Array.isArray(reviewData.tags) ? reviewData.tags : [],
+          isRewatched: Boolean(reviewData.isRewatched),
+          containsSpoilers: Boolean(reviewData.containsSpoilers),
+          visibility: String(reviewData.visibility || 'friends'),
         };
       } else {
         // Legacy format support
         const [movieId, rating, comment] = arguments;
         requestData = {
-          showId: movieId,
-          rating: rating,
-          comment: comment || '',
+          showId: Number(movieId),
+          rating: Number(rating),
+          comment: String(comment || '').trim(),
           visibility: 'friends'
         };
       }
 
-      console.log(`[AppContext] Adding review:`, requestData);
+      console.log(`[AppContext] Clean requestData:`, requestData);
+      
+      // Check if user already has a review for this movie
+      const existingReview = getUserReview(requestData.showId);
+      const isEditing = !!existingReview;
+      
+      console.log(`[AppContext] Existing review found:`, isEditing, existingReview);
       
       const response = await BackendService.addReview(
         requestData.showId,
@@ -504,28 +649,42 @@ export const AppProvider = ({ children }) => {
       );
       
       if (response.success) {
-        console.log('[AppContext] Review added successfully:', response.review);
+        console.log(`[AppContext] Review ${isEditing ? 'updated' : 'added'} successfully:`, response.review);
         
-        // Add to local reviews array for immediate UI update
-        const newReview = {
+        // Create the review object for local state
+        const reviewUpdate = {
           movieId: Number(requestData.showId),
           rating: Number(requestData.rating),
           comment: requestData.comment || '',
           ...response.review
         };
         
-        setReviews(prev => [...prev, newReview]);
+        if (isEditing) {
+          // Update existing review in local state
+          setReviews(prev => prev.map(r => 
+            r.movieId === requestData.showId ? reviewUpdate : r
+          ));
+        } else {
+          // Add new review to local state
+          setReviews(prev => [...prev, reviewUpdate]);
+        }
+      
+        // Create activity log for review action
+        createActivity('review', isEditing ? 'updated' : 'added', requestData.movie, {
+          rating: requestData.rating,
+          comment: requestData.comment
+        });
         
-        // Refresh activity to show new review in social feed
-        await refreshData();
+        // Cache updated data
+        await cacheUserData();
         
-        return { success: true, review: newReview };
+        return { success: true, review: reviewUpdate, isEditing };
       } else {
-        console.error('[AppContext] Failed to add review:', response.error);
+        console.error(`[AppContext] Failed to ${isEditing ? 'update' : 'add'} review:`, response.error);
         return { success: false, error: response.error };
       }
     } catch (error) {
-      console.error('[AppContext] Error adding review:', error);
+      console.error('[AppContext] Error managing review:', error);
       return { success: false, error: error.message };
     }
   };
@@ -586,7 +745,16 @@ export const AppProvider = ({ children }) => {
 
   const shareMovie = async (friendId, movie) => {
     try {
-      return await BackendService.shareMovie(friendId, movie);
+      const result = await BackendService.shareMovie(friendId, movie);
+      
+      if (result.success) {
+        // Create activity log for successful movie share
+        createActivity('movie_share', 'shared', movie, {
+          friendId: friendId
+        });
+      }
+      
+      return result;
     } catch (error) {
       console.error('Error sharing movie:', error);
       return { success: false, error: error.message };
@@ -677,6 +845,16 @@ export const AppProvider = ({ children }) => {
     }
   };
 
+  const getFriendProfile = async (friendId) => {
+    try {
+      const profileData = await BackendService.getFriendProfile(friendId);
+      return profileData;
+    } catch (error) {
+      console.error('Error fetching friend profile:', error);
+      throw error;
+    }
+  };
+
   // Utility functions
   const isInList = (movieId, listType) => {
     // Normalize list type for consistent handling
@@ -743,6 +921,7 @@ export const AppProvider = ({ children }) => {
     acceptFriendRequest,
     rejectFriendRequest,
     removeFriend,
+    getFriendProfile,
     searchUsers,
     getConversation,
     sendMessage,

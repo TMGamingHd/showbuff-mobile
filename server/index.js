@@ -153,7 +153,7 @@ app.post('/api/user/add-to-list', requireAuth, (req, res) => {
     action: normalized === 'watchlist' ? 'added_to_watchlist' : 
            normalized === 'currently-watching' ? 'added_to_watching' : 'added_to_watched',
     userId: req.userId,
-    userName: user?.name || user?.email || 'User',
+    userName: user?.username || user?.email || 'User',
     movieId: show.id,
     movieTitle: show.title || 'Unknown Movie',
     moviePoster: show.poster_path,
@@ -220,7 +220,7 @@ app.post('/api/user/move-to-list', requireAuth, (req, res) => {
     action: normalizedTo === 'watchlist' ? 'moved_to_watchlist' : 
            normalizedTo === 'currently-watching' ? 'moved_to_watching' : 'moved_to_watched',
     userId: req.userId,
-    userName: user?.name || user?.email || 'User',
+    userName: user?.username || user?.email || 'User',
     movieId: show.id,
     movieTitle: show.title || 'Unknown Movie',
     moviePoster: show.poster_path,
@@ -250,69 +250,97 @@ app.post('/api/user/copy-from-friend', requireAuth, (req, res) => {
 
 // ===== Reviews =====
 app.post('/api/user/reviews', requireAuth, (req, res) => {
-  const { showId, rating, comment, movie, tags, isRewatched, containsSpoilers, visibility } = req.body || {};
-  if (!showId && !movie?.id) return res.status(400).json({ message: 'showId or movie required' });
-  
-  const movieId = showId || movie.id;
-  const arr = reviews.get(req.userId) || [];
-  const user = getUser(req.userId);
-  
-  const review = { 
-    id: `${req.userId}-${movieId}-${Date.now()}`, 
-    movieId: Number(movieId),
-    movie: movie || { id: movieId, title: 'Unknown Movie' },
-    rating: Number(rating) || 0, 
-    comment: comment || '',
-    tags: tags || [],
-    isRewatched: Boolean(isRewatched),
-    containsSpoilers: Boolean(containsSpoilers),
-    visibility: visibility || 'friends',
-    userId: req.userId,
-    userName: user?.name || user?.email || 'User',
-    createdAt: new Date().toISOString(),
-    reactions: [],
-    comments: []
-  };
-  
-  arr.push(review);
-  reviews.set(req.userId, arr);
-  
-  // Add to activity feed for social visibility
-  const activity = activities.get('global') || [];
-  if (visibility === 'public' || visibility === 'friends') {
-    activity.unshift({
+  try {
+    const { showId, rating, comment, movie, tags, isRewatched, containsSpoilers, visibility } = req.body || {};
+    if (!showId && !movie?.id) return res.status(400).json({ message: 'showId or movie required' });
+    
+    const movieId = showId || movie.id;
+    const arr = reviews.get(req.userId) || [];
+    const user = getUserById(req.userId);
+    
+    // Check if user already has a review for this movie
+    const existingReviewIndex = arr.findIndex(r => Number(r.movieId) === Number(movieId));
+    const isEditing = existingReviewIndex !== -1;
+    
+    const reviewData = { 
+      movieId: Number(movieId),
+      movie: movie || { id: movieId, title: 'Unknown Movie' },
+      rating: Number(rating) || 0, 
+      comment: comment || '',
+      tags: tags || [],
+      isRewatched: Boolean(isRewatched),
+      containsSpoilers: Boolean(containsSpoilers),
+      visibility: visibility || 'friends',
+      userId: req.userId,
+      userName: user?.username || user?.email || 'User',
+      reactions: [],
+      comments: []
+    };
+    
+    let review;
+    if (isEditing) {
+      // Update existing review
+      const existingReview = arr[existingReviewIndex];
+      review = {
+        ...existingReview,
+        ...reviewData,
+        id: existingReview.id, // Keep original ID
+        createdAt: existingReview.createdAt, // Keep original creation date
+        updatedAt: new Date().toISOString() // Add update timestamp
+      };
+      arr[existingReviewIndex] = review;
+    } else {
+      // Create new review
+      review = {
+        id: `${req.userId}-${movieId}-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+        ...reviewData
+      };
+      arr.push(review);
+    }
+    
+    reviews.set(req.userId, arr);
+    
+    // Add to activity feed for social visibility
+    const activity = activities.get('global') || [];
+    if (visibility === 'public' || visibility === 'friends') {
+      activity.unshift({
+        id: `activity-${Date.now()}`,
+        type: 'review',
+        action: isEditing ? 'updated' : 'reviewed',
+        userId: req.userId,
+        userName: review.userName,
+        movie: review.movie,
+        rating: review.rating,
+        content: review.comment,
+        createdAt: review.createdAt,
+        visibility: review.visibility
+      });
+      activities.set('global', activity.slice(0, 50)); // Keep last 50 activities
+    }
+    
+    // Add to user's personal activity feed
+    const userActivities = activities.get(req.userId) || [];
+    userActivities.unshift({
       id: `activity-${Date.now()}`,
       type: 'review',
-      action: 'reviewed',
+      action: isEditing ? 'updated' : 'reviewed',
       userId: req.userId,
       userName: review.userName,
-      movie: review.movie,
+      movieId: review.movieId,
+      movieTitle: review.movie?.title || 'Unknown Movie',
+      moviePoster: review.movie?.poster_path,
       rating: review.rating,
-      content: review.comment,
-      createdAt: review.createdAt,
-      visibility: review.visibility
+      comment: review.comment,
+      createdAt: review.createdAt
     });
-    activities.set('global', activity.slice(0, 50)); // Keep last 50 activities
+    activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
+    
+    return res.json({ success: true, review, isEditing });
+  } catch (error) {
+    console.error('Error managing review:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
-  
-  // Add to user's personal activity feed
-  const userActivities = activities.get(req.userId) || [];
-  userActivities.unshift({
-    id: `activity-${Date.now()}`,
-    type: 'review',
-    action: 'reviewed',
-    userId: req.userId,
-    userName: review.userName,
-    movieId: review.movieId,
-    movieTitle: review.movie?.title || 'Unknown Movie',
-    moviePoster: review.movie?.poster_path,
-    rating: review.rating,
-    comment: review.comment,
-    createdAt: review.createdAt
-  });
-  activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
-  
-  return res.json({ success: true, review });
 });
 
 app.get('/api/user/reviews', requireAuth, (req, res) => {
@@ -323,14 +351,19 @@ app.get('/api/movie/:showId/reviews', requireAuth, (req, res) => {
   const showId = Number(req.params.showId);
   const all = [];
   for (const [uid, arr] of reviews.entries()) {
-    for (const r of arr) if (Number(r.showId) === showId) all.push({ ...r, userId: uid });
+    for (const r of arr) if (Number(r.movieId) === showId) all.push({ ...r, userId: uid });
   }
   return res.json(all);
 });
 
 // ===== Friends =====
 app.get('/api/friends', requireAuth, (req, res) => {
-  res.json(friends.get(req.userId) || []);
+  const userFriends = friends.get(req.userId) || [];
+  console.log(`[${new Date().toISOString()}] GET /api/friends for user ${req.userId}`);
+  console.log('Current friends:', userFriends);
+  console.log('All users in system:', users);
+  console.log('All friends data:', Array.from(friends.entries()));
+  res.json(userFriends);
 });
 
 app.get('/api/friends/requests', requireAuth, (req, res) => {
@@ -412,6 +445,49 @@ app.post('/api/friends/reject/:requestId', requireAuth, (req, res) => {
   reqs.splice(idx, 1);
   friendRequests.set(req.userId, reqs);
   res.json({ success: true });
+});
+
+// Get friend's profile data
+app.get('/api/friends/:friendId/profile', requireAuth, (req, res) => {
+  const friendId = Number(req.params.friendId);
+  const userFriends = friends.get(req.userId) || [];
+  
+  console.log(`[${new Date().toISOString()}] GET /api/friends/${friendId}/profile`);
+  console.log('Requesting user ID:', req.userId);
+  console.log('Friend ID:', friendId);
+  console.log('All users:', users);
+  console.log('All friends data:', Array.from(friends.entries()));
+  console.log('User friends:', userFriends);
+  
+  // Check if they are actually friends
+  const isFriend = userFriends.some(f => Number(f.id) === friendId);
+  if (!isFriend) {
+    console.log('Not authorized - not friends');
+    return res.status(403).json({ error: 'Not authorized to view this profile' });
+  }
+  
+  // Get friend's data
+  const friendLists = lists.get(friendId) || { watchlist: [], 'currently-watching': [], watched: [] };
+  const friendWatchlist = friendLists.watchlist || [];
+  const friendCurrentlyWatching = friendLists['currently-watching'] || [];
+  const friendWatched = friendLists.watched || [];
+  const friendReviews = reviews.get(friendId) || [];
+  
+  console.log('Friend data:');
+  console.log('- Watchlist:', friendWatchlist.length, 'items');
+  console.log('- Currently Watching:', friendCurrentlyWatching.length, 'items');
+  console.log('- Watched:', friendWatched.length, 'items');
+  console.log('- Reviews:', friendReviews.length, 'items');
+  
+  const response = {
+    watchlist: friendWatchlist,
+    currentlyWatching: friendCurrentlyWatching,
+    watched: friendWatched,
+    reviews: friendReviews
+  };
+  
+  console.log('Sending response:', JSON.stringify(response, null, 2));
+  res.json(response);
 });
 
 app.delete('/api/friends/remove/:friendId', requireAuth, (req, res) => {
@@ -617,6 +693,9 @@ app.get('/api/feed/social', requireAuth, (req, res) => {
   res.json(socialFeed.slice(0, 20)); // Return latest 20 items
 });
 
+// Always start the server (works for both local and deployed environments)
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`ShowBuff mock backend listening on http://0.0.0.0:${PORT}`);
 });
+
+module.exports = app;

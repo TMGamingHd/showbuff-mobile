@@ -98,14 +98,20 @@ const ProfileScreen = ({ navigation }) => {
           return `Added "${activityItem.movieTitle}" to watchlist`;
         case 'moved_to_watchlist':
           return `Moved "${activityItem.movieTitle}" to watchlist`;
-        case 'added_to_watching':
+        case 'added_to_currentlywatching':
           return `Started watching "${activityItem.movieTitle}"`;
-        case 'moved_to_watching':
+        case 'moved_to_currentlywatching':
           return `Moved "${activityItem.movieTitle}" to currently watching`;
         case 'added_to_watched':
           return `Finished watching "${activityItem.movieTitle}"`;
         case 'moved_to_watched':
           return `Moved "${activityItem.movieTitle}" to watched`;
+        case 'removed_from_watchlist':
+          return `Removed "${activityItem.movieTitle}" from watchlist`;
+        case 'removed_from_currentlywatching':
+          return `Removed "${activityItem.movieTitle}" from currently watching`;
+        case 'removed_from_watched':
+          return `Removed "${activityItem.movieTitle}" from watched`;
         default:
           return `Updated "${activityItem.movieTitle}" in your lists`;
       }
@@ -411,7 +417,7 @@ const ProfileScreen = ({ navigation }) => {
       ) : (
         <SectionList
           sections={groupActivitiesByDate(activity)}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item, index) => item.id || `activity-${index}`}
           renderItem={renderActivityItem}
           renderSectionHeader={renderActivityHeader}
           stickySectionHeadersEnabled={true}

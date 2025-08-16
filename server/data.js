@@ -1,9 +1,10 @@
 // In-memory data store for ShowBuff mock backend
 const { v4: uuidv4 } = require('uuid');
 
-// Start with demo account
+// Start with demo account and tony account
 const users = [
-  { id: 1, username: 'demo', email: 'demo@showbuff.com', password: 'demo123' }
+  { id: 1, username: 'demo', email: 'demo@showbuff.com', password: 'demo123' },
+  { id: 2, username: 'tony', email: 'tony@gmail.com', password: 'tony123' }
 ];
 
 // Token map: token -> userId
@@ -25,8 +26,11 @@ const lists = new Map();
 // Reviews per userId - start empty
 const reviews = new Map();
 
-// Friends and requests - start empty
-const friends = new Map();
+// Friends - demo and tony are friends
+const friends = new Map([
+  [1, [{ id: 2, username: 'tony' }]], // demo is friends with tony
+  [2, [{ id: 1, username: 'demo' }]]  // tony is friends with demo
+]);
 const friendRequests = new Map();
 
 // Messages per (userId, friendId) key -> array

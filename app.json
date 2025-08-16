@@ -27,6 +27,27 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "APP_ENV": "production",
+      "LOCAL_BACKEND_URL_ANDROID": "http://10.0.2.2:3001/api",
+      "LOCAL_BACKEND_URL_IOS": "http://127.0.0.1:3001/api",
+      "LOCAL_BACKEND_URL_PHYSICAL": "http://192.168.1.148:3001/api",
+      "LOCAL_BACKEND_PORT": "3001",
+      "API_TIMEOUT": "10000",
+      "ENABLE_DEMO_MODE": "false",
+      "USE_PRODUCTION_BACKEND": "true",
+      "TMDB_API_KEY": "45eff3de944d9ab75c41d53848cce337",
+      "TMDB_BASE_URL": "https://api.themoviedb.org/3",
+      "eas": {
+        "projectId": "b6852c77-c739-433b-9512-fe1102b571e8"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/b6852c77-c739-433b-9512-fe1102b571e8"
     }
   }
 }

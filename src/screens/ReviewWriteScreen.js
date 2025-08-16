@@ -71,17 +71,37 @@ const ReviewWriteScreen = ({ route, navigation }) => {
     setIsSubmitting(true);
 
     try {
-      const reviewData = {
-        movieId: movie.id,
-        movie: movie,
+      // Debug the state values first
+      console.log('Raw state values:', {
         rating: rating,
-        comment: reviewText.trim(),
-        tags: selectedTags,
-        isRewatched,
-        containsSpoilers,
-        visibility,
+        reviewText: reviewText,
+        movie: movie,
+        visibility: visibility
+      });
+
+      // Ensure values are properly extracted and not functions
+      const cleanRating = typeof rating === 'number' ? rating : parseInt(rating) || 0;
+      const cleanComment = typeof reviewText === 'string' ? reviewText.trim() : '';
+      const cleanVisibility = typeof visibility === 'string' ? visibility : 'friends';
+      
+      const reviewData = {
+        movieId: Number(movie.id),
+        movie: {
+          id: movie.id,
+          title: movie.title || movie.name,
+          poster_path: movie.poster_path,
+          release_date: movie.release_date || movie.first_air_date
+        },
+        rating: cleanRating,
+        comment: cleanComment,
+        tags: Array.isArray(selectedTags) ? selectedTags : [],
+        isRewatched: Boolean(isRewatched),
+        containsSpoilers: Boolean(containsSpoilers),
+        visibility: cleanVisibility,
         createdAt: new Date().toISOString(),
       };
+
+      console.log('Clean review data:', reviewData);
 
       // Add review via AppContext (this will call the backend)
       const result = await addReview(reviewData);

@@ -165,14 +165,20 @@ const WatchlistScreen = () => {
   const handleAddReview = async () => {
     if (!selectedMovie) return;
 
-    const result = await addReview(selectedMovie.id, reviewData.rating, reviewData.comment);
+    const reviewDataObj = {
+      movieId: selectedMovie.id,
+      movie: selectedMovie,
+      rating: reviewData.rating,
+      comment: reviewData.comment
+    };
+    const result = await addReview(reviewDataObj);
     
     if (result.success) {
       setShowReviewModal(false);
       setReviewData({ rating: 5, comment: '' });
-      showToast('Review saved');
+      showToast(result.isEditing ? 'Review updated!' : 'Review saved!');
     } else {
-      Alert.alert('Error', result.error || 'Failed to add review');
+      Alert.alert('Error', result.error || 'Failed to save review');
     }
   };
 

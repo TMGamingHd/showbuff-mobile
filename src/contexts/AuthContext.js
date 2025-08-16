@@ -308,7 +308,18 @@ export const AuthProvider = ({ children }) => {
       BackendService.clearToken();
       
       // Clear stored data
-      await AsyncStorage.multiRemove(['user', 'authToken']);
+      await AsyncStorage.multiRemove([
+        'user',
+        'authToken',
+        // Also clear any persisted caches for user data to avoid stale contamination
+        'watchlist',
+        'currentlyWatching',
+        'watched',
+        'reviews',
+        'userData',
+        'lastSync'
+      ]);
+      console.log('[AuthContext] Cleared auth and cached user list data from AsyncStorage');
       
       setUser(null);
       setIsAuthenticated(false);

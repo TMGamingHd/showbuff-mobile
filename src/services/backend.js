@@ -5,23 +5,34 @@ import Constants from 'expo-constants';
 
 class BackendService {
   constructor() {
-    // Use special IP for Android emulators to access host machine
-    // For real devices, you'll need to use your computer's actual network IP
-    const isAndroid = Platform.OS === 'android';
-    
     // Get environment variables from Expo Constants (support both new and legacy fields)
     const env = (Constants.expoConfig?.extra) || (Constants.manifest?.extra) || {};
     
-    // Set baseURL based on platform using environment variables
-    if (isAndroid) {
-      this.baseURL = env.LOCAL_BACKEND_URL_ANDROID || 'http://10.0.2.2:3001/api'; // Android emulator special IP
-    } else {
-      this.baseURL = env.LOCAL_BACKEND_URL_IOS || 'http://127.0.0.1:3001/api'; // iOS simulator
-    }
+    const isAndroid = Platform.OS === 'android';
+    // More reliable physical device detection
+    const isPhysicalDevice = Constants.isDevice === true;
+    
+    // Use deployed backend for production, local for development
+    const PRODUCTION_BACKEND_URL = 'https://showbuff-production.up.railway.app/api';
+    
+    // Force production backend for now (environment variables not loading correctly)
+    this.baseURL = PRODUCTION_BACKEND_URL;
+    
+    // Debug environment variables
+    console.log('Environment variables:', env);
+    console.log('USE_PRODUCTION_BACKEND:', env.USE_PRODUCTION_BACKEND);
     
     console.log(`BackendService initialized with baseURL: ${this.baseURL}`);
     console.log('Platform:', Platform.OS);
+    console.log('Is Physical Device:', isPhysicalDevice);
+    console.log('Constants.isDevice:', Constants.isDevice);
+    console.log('Constants.appOwnership:', Constants.appOwnership);
+    console.log('Constants.executionEnvironment:', Constants.executionEnvironment);
+    console.log('Constants.platform:', Constants.platform);
     console.log('Environment variables available:', Object.keys(env).join(', '));
+    
+    // Remove old fallback logic that was overriding the production URL
+    console.log('FINAL baseURL being used:', this.baseURL);
     
     this.token = null;
     this.demoMode = false;
@@ -298,15 +309,14 @@ class BackendService {
   }
 
   async addToList(movieData, listType) {
-    console.log('BackendService.addToList called with:', { movieData, listType });
+    console.log('BackendService.addToList called with:', { movieId: movieData?.id, listType });
     
     // Normalize list type to backend format (hyphenated)
     const normalizedList = String(listType).replace(/_/g, '-');
 
     const requestBody = {
       movieId: movieData.id,
-      listType: normalizedList,
-      movieData: movieData
+      listType: normalizedList
     };
     
     console.log('Sending add-to-list request:', requestBody);
@@ -556,6 +566,21 @@ class BackendService {
     }
   }
 
+  async getFriendProfile(friendId) {
+    console.log('=== BACKEND SERVICE GET FRIEND PROFILE ===');
+    console.log('Friend ID:', friendId);
+    console.log('Token present:', this.token ? 'YES' : 'NO');
+    
+    try {
+      const response = await this.makeRequest(`/api/friends/${friendId}/profile`);
+      console.log('Friend profile response:', response);
+      return response;
+    } catch (error) {
+      console.error('Error fetching friend profile:', error);
+      throw error;
+    }
+  }
+
   async shareMovie(friendId, movieData) {
     console.log('=== BACKEND SERVICE SHARE MOVIE START ===');
     console.log('Friend ID:', friendId);
@@ -567,6 +592,26 @@ class BackendService {
     
     const messageText = movieData ? `Check out this movie: ${movieData.title}` : 'Shared a movie with you';
     
+    // Strip down movie data to essential fields only to avoid 413 payload too large errors
+    const essentialMovieData = movieData ? {
+      id: movieData.id,
+      title: movieData.title || movieData.name,
+      name: movieData.name || movieData.title,
+      poster_path: movieData.poster_path,
+      backdrop_path: movieData.backdrop_path,
+      overview: movieData.overview,
+      release_date: movieData.release_date || movieData.first_air_date,
+      first_air_date: movieData.first_air_date || movieData.release_date,
+      vote_average: movieData.vote_average,
+      vote_count: movieData.vote_count,
+      genre_ids: movieData.genre_ids,
+      media_type: movieData.media_type,
+      adult: movieData.adult,
+      original_language: movieData.original_language,
+      original_title: movieData.original_title,
+      popularity: movieData.popularity
+    } : null;
+    
     const requestBody = {
       receiverId: friendId,
       friendId,
@@ -575,10 +620,10 @@ class BackendService {
       messageText: messageText,
       content: messageText,
       type: 'movie_share',
-      movie: movieData,
+      movie: essentialMovieData,
     };
     
-    console.log('Share movie request body:', requestBody);
+    console.log('Share movie request body (size reduced):', requestBody);
     console.log('Calling makeRequest with endpoint: /api/messages/send-movie');
     
     try {

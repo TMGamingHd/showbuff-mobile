@@ -38,6 +38,20 @@ const MovieDetailScreen = ({ route, navigation }) => {
     loadMovieDetails();
   }, []);
 
+  // Pre-populate form when editing existing review
+  useEffect(() => {
+    if (showReviewModal) {
+      const existingReview = getUserReview(movie.id);
+      if (existingReview) {
+        setRating(existingReview.rating);
+        setReviewComment(existingReview.comment || '');
+      } else {
+        setRating(0);
+        setReviewComment('');
+      }
+    }
+  }, [showReviewModal, movie.id]);
+
   const loadMovieDetails = async () => {
     try {
       setLoading(true);
@@ -106,22 +120,35 @@ const MovieDetailScreen = ({ route, navigation }) => {
       return;
     }
 
-    const result = await addReview(movie.id, rating, reviewComment);
+    const reviewData = {
+      movieId: movie.id,
+      movie: movie,
+      rating: rating,
+      comment: reviewComment
+    };
+    const result = await addReview(reviewData);
     if (result.success) {
-      showToast('Review added!');
+      showToast(result.isEditing ? 'Review updated!' : 'Review added!');
       setShowReviewModal(false);
       setRating(0);
       setReviewComment('');
     } else {
-      Alert.alert('Error', result.error || 'Failed to add review');
+      Alert.alert('Error', result.error || 'Failed to save review');
     }
   };
 
   const handleShareMovie = () => {
+    console.log('=== MOVIE DETAIL SCREEN SHARE BUTTON PRESSED ===');
+    console.log('Movie data:', movie);
+    console.log('Movie ID:', movie?.id);
+    console.log('Movie title:', movie?.title || movie?.name);
     setShowShareModal(true);
   };
 
   const handleFriendSelect = (friend, sharedMovie) => {
+    console.log('=== MOVIE DETAIL SCREEN FRIEND SELECTED ===');
+    console.log('Friend:', friend);
+    console.log('Shared movie:', sharedMovie);
     showToast(`Shared ${sharedMovie.title || sharedMovie.name} with ${friend.username}!`);
     setShowShareModal(false);
   };
@@ -303,12 +330,15 @@ const MovieDetailScreen = ({ route, navigation }) => {
               </Text>
             </View>
           ) : (
+            <></>
+          )}
+          {isInList(movie.id, 'watched') && (
             <TouchableOpacity
               style={styles.addReviewButton}
               onPress={() => setShowReviewModal(true)}
             >
-              <Ionicons name="add-circle-outline" size={20} color="#3B82F6" />
-              <Text style={styles.addReviewText}>Add Review</Text>
+              <Ionicons name={getUserReview(movie.id) ? "create-outline" : "add-circle-outline"} size={20} color="#3B82F6" />
+              <Text style={styles.addReviewText}>{getUserReview(movie.id) ? 'Edit Review' : 'Add Review'}</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -318,7 +348,7 @@ const MovieDetailScreen = ({ route, navigation }) => {
       {showReviewModal && (
         <View style={styles.modalOverlay}>
           <View style={styles.reviewModal}>
-            <Text style={styles.modalTitle}>Rate & Review</Text>
+            <Text style={styles.modalTitle}>{getUserReview(movie.id) ? 'Edit Review' : 'Rate & Review'}</Text>
             <Text style={styles.modalSubtitle}>{movie.title || movie.name}</Text>
             
             <Text style={styles.ratingLabel}>Rating (1-10)</Text>

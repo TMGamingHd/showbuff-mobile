@@ -45,8 +45,8 @@ const ProfileScreen = ({ navigation }) => {
         case 'added_to_watchlist':
         case 'moved_to_watchlist':
           return 'bookmark';
-        case 'added_to_watching':
-        case 'moved_to_watching':
+        case 'added_to_currentlywatching':
+        case 'moved_to_currentlywatching':
           return 'play-circle';
         case 'added_to_watched':
         case 'moved_to_watched':
@@ -60,7 +60,10 @@ const ProfileScreen = ({ navigation }) => {
       case 'review':
         return 'star';
       case 'post':
-        return 'chatbubble';
+      case 'movie_post':
+      case 'text_post':
+        // Use a distinct icon for posts instead of generic chat bubble
+        return 'create';
       case 'movie_share':
         return 'share';
       default:
@@ -83,6 +86,8 @@ const ProfileScreen = ({ navigation }) => {
       case 'review':
         return '#F59E0B'; // Amber
       case 'post':
+      case 'movie_post':
+      case 'text_post':
         return '#EC4899'; // Pink
       case 'movie_share':
         return '#EF4444'; // Red
@@ -121,7 +126,15 @@ const ProfileScreen = ({ navigation }) => {
       case 'review':
         return `Reviewed "${activityItem.movieTitle}" with ${activityItem.rating}/10 stars`;
       case 'post':
-        return `Posted: "${activityItem.content?.substring(0, 50)}${activityItem.content?.length > 50 ? '...' : ''}"`;
+      case 'movie_post':
+      case 'text_post':
+        // For movie posts, show a specific label with the movie title
+        if (activityItem.movieTitle || activityItem.movieId || activityItem.moviePoster) {
+          const title = activityItem.movieTitle || 'a movie';
+          return `You made a post about "${title}"`;
+        }
+        // Fallback for non-movie posts
+        return 'You made a post';
       case 'movie_share':
         return `Shared "${activityItem.movieTitle}" with a friend`;
       default:
@@ -254,17 +267,22 @@ const ProfileScreen = ({ navigation }) => {
 
   // Group activities by date
   const groupActivitiesByDate = (activities) => {
+    // Sort newest first to ensure sections and items are ordered correctly
+    const sorted = [...(activities || [])].sort(
+      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+    );
+
     const grouped = {};
-    
-    activities.forEach(activity => {
+
+    sorted.forEach(activity => {
       const dateString = getActivityDateString(activity.createdAt);
       if (!grouped[dateString]) {
         grouped[dateString] = [];
       }
       grouped[dateString].push(activity);
     });
-    
-    // Convert to array format for FlatList
+
+    // Convert to array format for SectionList, preserving insertion order
     return Object.keys(grouped).map(date => ({
       date,
       data: grouped[date]

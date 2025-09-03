@@ -549,6 +549,200 @@ app.get('/api/user/activity', requireAuth, (req, res) => {
   res.json(acts);
 });
 
+// Create a new post
+app.post('/api/activity/create-post', requireAuth, (req, res) => {
+  const { content, type = 'text_post', movie, visibility = 'public' } = req.body || {};
+
+  const trimmed = (content || '').trim();
+  if (!trimmed) {
+    return res.status(400).json({ success: false, error: 'Content is required' });
+  }
+
+  const user = getUserById(req.userId);
+  if (!user) {
+    return res.status(404).json({ success: false, error: 'User not found' });
+  }
+
+  // Normalize optional movie payload if provided
+  let postMovie = undefined;
+  if (movie && typeof movie === 'object') {
+    // Only include commonly used fields for the feed UI
+    postMovie = {
+      id: Number(movie.id) || movie.id,
+      title: movie.title || movie.name || 'Unknown Movie',
+      poster_path: movie.poster_path || null,
+      vote_average: typeof movie.vote_average === 'number' ? movie.vote_average : Number(movie.vote_average) || undefined,
+      listType: movie.listType || undefined,
+    };
+  }
+
+  const post = {
+    id: `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    type: type,
+    action: 'created_post',
+    userId: req.userId,
+    userName: user.username,
+    userEmail: user.email,
+    content: trimmed,
+    movie: postMovie, // May be undefined for text-only posts
+    createdAt: new Date().toISOString(),
+    visibility: visibility || 'public',
+    reactions: [],
+    comments: [],
+  };
+
+  // Add to global activity feed
+  const globalActivity = activities.get('global') || [];
+  globalActivity.unshift(post);
+  activities.set('global', globalActivity.slice(0, 100)); // Keep last 100 activities
+
+  // Add to user's personal activity feed
+  const userActivities = activities.get(req.userId) || [];
+  userActivities.unshift(post);
+  activities.set(req.userId, userActivities.slice(0, 50)); // Keep last 50 user activities
+
+  res.json({ success: true, post });
+});
+
+// Utility to update a post across global and owner activity lists
+function updatePostEverywhere(postId, updater) {
+  // Update in global feed first
+  const global = activities.get('global') || [];
+  let idx = global.findIndex(p => p.id === postId);
+  if (idx >= 0) {
+    const updated = updater({ ...global[idx] });
+    global[idx] = updated;
+    activities.set('global', global);
+
+    // Also update in owner's personal activity list
+    const ownerId = updated.userId;
+    const ownerActs = activities.get(ownerId) || [];
+    const idx2 = ownerActs.findIndex(p => p.id === postId);
+    if (idx2 >= 0) {
+      ownerActs[idx2] = updated;
+      activities.set(ownerId, ownerActs);
+    }
+    return updated;
+  }
+
+  // Fallback: search all activity lists
+  for (const [key, arr] of activities.entries()) {
+    if (key === 'global') continue;
+    const i = (arr || []).findIndex(p => p.id === postId);
+    if (i >= 0) {
+      const updated = updater({ ...arr[i] });
+      arr[i] = updated;
+      activities.set(key, arr);
+
+      // Try syncing to global if exists
+      const g2 = activities.get('global') || [];
+      const ig = g2.findIndex(p => p.id === postId);
+      if (ig >= 0) {
+        g2[ig] = updated;
+        activities.set('global', g2);
+      }
+      return updated;
+    }
+  }
+  return null;
+}
+
+// Toggle like on a post
+app.post('/api/posts/:postId/like', requireAuth, (req, res) => {
+  const { postId } = req.params;
+  const updated = updatePostEverywhere(postId, (post) => {
+    if (!Array.isArray(post.reactions)) post.reactions = [];
+    const existsIdx = post.reactions.findIndex(uid => Number(uid) === Number(req.userId));
+    if (existsIdx >= 0) {
+      post.reactions.splice(existsIdx, 1);
+    } else {
+      post.reactions.push(req.userId);
+    }
+    return post;
+  });
+
+  if (!updated) return res.status(404).json({ message: 'Post not found' });
+  const liked = Array.isArray(updated.reactions) && updated.reactions.some(uid => Number(uid) === Number(req.userId));
+  return res.json({ success: true, post: updated, liked, reactions: Array.isArray(updated.reactions) ? updated.reactions.length : 0 });
+});
+
+// Add a comment to a post
+app.post('/api/posts/:postId/comments', requireAuth, (req, res) => {
+  const { postId } = req.params;
+  const { text } = req.body || {};
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return res.status(400).json({ message: 'text required' });
+  const user = getUserById(req.userId);
+
+  const updated = updatePostEverywhere(postId, (post) => {
+    if (!Array.isArray(post.comments)) post.comments = [];
+    const comment = {
+      id: `c_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      userId: req.userId,
+      userName: user?.username || user?.email || 'User',
+      text: trimmed,
+      createdAt: new Date().toISOString(),
+      likes: [],
+    };
+    post.comments.push(comment);
+    return post;
+  });
+
+  if (!updated) return res.status(404).json({ message: 'Post not found' });
+  return res.json({ success: true, post: updated, comments: Array.isArray(updated.comments) ? updated.comments.length : 0 });
+});
+
+// Get comments for a post
+app.get('/api/posts/:postId/comments', requireAuth, (req, res) => {
+  const { postId } = req.params;
+  const { sort, limit } = req.query || {};
+  const global = activities.get('global') || [];
+  const post = global.find(p => p.id === postId);
+  if (!post) return res.status(404).json({ message: 'Post not found' });
+  let comments = Array.isArray(post.comments) ? [...post.comments] : [];
+
+  // Optional sorting: sort=top sorts by likes count desc, then createdAt desc
+  if (String(sort).toLowerCase() === 'top') {
+    comments.sort((a, b) => {
+      const la = Array.isArray(a.likes) ? a.likes.length : 0;
+      const lb = Array.isArray(b.likes) ? b.likes.length : 0;
+      if (lb !== la) return lb - la;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+  }
+
+  // Optional limit
+  const lim = Number(limit);
+  if (!Number.isNaN(lim) && lim > 0) {
+    comments = comments.slice(0, lim);
+  }
+
+  return res.json({ success: true, comments });
+});
+
+// Toggle like on a comment
+app.post('/api/posts/:postId/comments/:commentId/like', requireAuth, (req, res) => {
+  const { postId, commentId } = req.params;
+  let updatedComment = null;
+  const updated = updatePostEverywhere(postId, (post) => {
+    if (!Array.isArray(post.comments)) post.comments = [];
+    const idx = post.comments.findIndex(c => c.id === commentId);
+    if (idx < 0) return post;
+    const c = { ...(post.comments[idx] || {}) };
+    if (!Array.isArray(c.likes)) c.likes = [];
+    const likeIdx = c.likes.findIndex(uid => Number(uid) === Number(req.userId));
+    if (likeIdx >= 0) c.likes.splice(likeIdx, 1); else c.likes.push(req.userId);
+    post.comments[idx] = c;
+    updatedComment = c;
+    return post;
+  });
+
+  if (!updated) return res.status(404).json({ message: 'Post not found' });
+  if (!updatedComment) return res.status(404).json({ message: 'Comment not found' });
+  const liked = Array.isArray(updatedComment.likes) && updatedComment.likes.some(uid => Number(uid) === Number(req.userId));
+  return res.json({ success: true, post: updated, comment: updatedComment, liked, likes: Array.isArray(updatedComment.likes) ? updatedComment.likes.length : 0 });
+});
+
 // ===== Messages =====
 app.get('/api/messages/conversations', requireAuth, (req, res) => {
   const me = req.userId;

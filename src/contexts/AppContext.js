@@ -42,6 +42,11 @@ export const AppProvider = ({ children }) => {
   const [lastSync, setLastSync] = useState(null);
   const [offlineMode, setOfflineMode] = useState(false);
 
+  // Use user-specific storage keys
+  const getStorageKey = (key) => {
+    return user?.id ? `${user.id}_${key}` : key;
+  };
+
   // Activity logging helper function
   const createActivity = (type, action, movie, additionalData = {}) => {
     const newActivity = {
@@ -79,28 +84,48 @@ export const AppProvider = ({ children }) => {
     }
   }, [isAuthenticated, user]);
 
+  // Persist activity whenever it changes (per-user session)
+  useEffect(() => {
+    if (!user?.id) return;
+    console.log(`[ActivityPersistence] Saving ${activity.length} activities to storage`);
+    const saveActivity = async () => {
+      try {
+        const storageKey = getStorageKey('activity');
+        await AsyncStorage.setItem(storageKey, JSON.stringify(activity));
+        console.log(`[ActivityPersistence] Saved activities to ${storageKey}`);
+      } catch (e) {
+        console.error('[ActivityPersistence] Save failed:', e);
+      }
+    };
+    saveActivity();
+  }, [activity, user]);
+
   const loadCachedData = async () => {
     try {
-      const cachedWatchlist = await AsyncStorage.getItem('watchlist');
-      const cachedCurrentlyWatching = await AsyncStorage.getItem('currentlyWatching');
-      const cachedWatched = await AsyncStorage.getItem('watched');
-      const cachedReviews = await AsyncStorage.getItem('reviews');
+      const cachedWatchlist = await AsyncStorage.getItem(getStorageKey('watchlist'));
+      const cachedCurrentlyWatching = await AsyncStorage.getItem(getStorageKey('currentlyWatching'));
+      const cachedWatched = await AsyncStorage.getItem(getStorageKey('watched'));
+      const cachedReviews = await AsyncStorage.getItem(getStorageKey('reviews'));
+      const cachedActivity = await AsyncStorage.getItem(getStorageKey('activity'));
       
       const wl = cachedWatchlist ? JSON.parse(cachedWatchlist) : null;
       const cw = cachedCurrentlyWatching ? JSON.parse(cachedCurrentlyWatching) : null;
       const wd = cachedWatched ? JSON.parse(cachedWatched) : null;
       const rv = cachedReviews ? JSON.parse(cachedReviews) : null;
+      const ac = cachedActivity ? JSON.parse(cachedActivity) : null;
       
       if (wl) setWatchlist(wl);
       if (cw) setCurrentlyWatching(cw);
       if (wd) setWatched(wd);
       if (rv) setReviews(rv);
+      if (ac) setActivity(ac);
       
       console.log('[AppContext] Loaded cached lists:', {
         watchlist: Array.isArray(wl) ? wl.length : 0,
         currentlyWatching: Array.isArray(cw) ? cw.length : 0,
         watched: Array.isArray(wd) ? wd.length : 0,
         reviews: Array.isArray(rv) ? rv.length : 0,
+        activity: Array.isArray(ac) ? ac.length : 0,
       });
     } catch (error) {
       console.error('Error loading cached data:', error);
@@ -110,11 +135,12 @@ export const AppProvider = ({ children }) => {
   const cacheUserData = async () => {
     try {
       await AsyncStorage.multiSet([
-        ['watchlist', JSON.stringify(watchlist)],
-        ['currentlyWatching', JSON.stringify(currentlyWatching)],
-        ['watched', JSON.stringify(watched)],
-        ['reviews', JSON.stringify(reviews)],
-        ['lastSync', new Date().toISOString()]
+        [getStorageKey('watchlist'), JSON.stringify(watchlist)],
+        [getStorageKey('currentlyWatching'), JSON.stringify(currentlyWatching)],
+        [getStorageKey('watched'), JSON.stringify(watched)],
+        [getStorageKey('reviews'), JSON.stringify(reviews)],
+        [getStorageKey('activity'), JSON.stringify(activity)],
+        [getStorageKey('lastSync'), new Date().toISOString()]
       ]);
     } catch (error) {
       console.error('Error caching user data:', error);
@@ -205,7 +231,86 @@ export const AppProvider = ({ children }) => {
         
         setFriends(Array.isArray(friendsData) ? friendsData : []);
         setFriendRequests(Array.isArray(requestsData) ? requestsData : []);
-        setActivity(Array.isArray(activityData) ? activityData : []);
+
+        // Normalize backend activity objects to the UI schema expected by ProfileScreen
+        const normalizeActivityItem = (item) => {
+          if (!item || typeof item !== 'object') return item;
+          const rawType = (item.type || item.activity_type || item.category || '').toString().toLowerCase();
+          let type = rawType;
+          if (['post_create', 'created_post', 'create_post', 'post_created', 'movie_post', 'text_post'].includes(rawType)) {
+            type = 'post';
+          }
+          if (!type && (item.postId || item.post_id)) {
+            type = 'post';
+          }
+          // Handle generic/ambiguous activity records that represent posts
+          if ((!type || type === 'activity') && (item.content || item.text) && (item.postId || item.post_id || item.movie || item.show)) {
+            type = 'post';
+          }
+          const action = item.action || item.activity || (type === 'post' ? 'created' : undefined);
+          const createdAt = item.createdAt || item.created_at || item.timestamp || new Date().toISOString();
+
+          // Extract nested movie/show data commonly returned by backend
+          const nestedMovie = item.movie || item.show || item.movie_data || item.movieData || null;
+
+          const movieId =
+            item.movieId ?? item.showId ?? item.show_id ?? item.tmdb_id ?? item.tmdbId ??
+            nestedMovie?.id ?? nestedMovie?.tmdb_id ?? nestedMovie?.movie_id;
+
+          const movieTitle =
+            item.movieTitle || item.movie_title || item.title || item.show_title || item.name ||
+            nestedMovie?.title || nestedMovie?.name;
+
+          const moviePoster =
+            item.moviePoster || item.show_poster_path || item.poster_path || item.movie_poster ||
+            nestedMovie?.poster_path || nestedMovie?.show_poster_path || nestedMovie?.movie_poster;
+          const rating = item.rating ?? item.stars;
+          const comment = item.comment || item.text || item.content;
+          const userId = item.userId ?? item.user_id ?? user?.id;
+
+          return {
+            // Preserve original id
+            id: item.id || `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            type: type || 'unknown',
+            action,
+            movieId,
+            movieTitle,
+            moviePoster,
+            rating,
+            comment,
+            userId,
+            createdAt,
+            // keep any other fields for future use
+            ...item,
+          };
+        };
+
+        const normalizedActivity = Array.isArray(activityData)
+          ? activityData.map(normalizeActivityItem)
+          : [];
+
+        // Merge with cached activity, de-duplicate by id, sort by createdAt desc
+        let cachedActivity = [];
+        try {
+          const cachedStr = await AsyncStorage.getItem(getStorageKey('activity'));
+          cachedActivity = cachedStr ? JSON.parse(cachedStr) : [];
+        } catch (e) {
+          console.warn('Failed to read cached activity for merge:', e);
+        }
+
+        const mapById = new Map();
+        [...normalizedActivity, ...cachedActivity].forEach(a => {
+          if (!a) return;
+          mapById.set(a.id, a);
+        });
+        const merged = Array.from(mapById.values()).sort((a, b) => {
+          const ta = new Date(a.createdAt || a.created_at || 0).getTime();
+          const tb = new Date(b.createdAt || b.created_at || 0).getTime();
+          return tb - ta;
+        }).slice(0, 500);
+
+        console.log('[AppContext] Normalized activity sample:', merged[0]);
+        setActivity(merged);
       } catch (error) {
         console.error('Error fetching social data:', error);
         // Continue even if social data fails
@@ -223,32 +328,18 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  const clearUserData = async () => {
+  const clearUserData = () => {
+    setUser(null);
     setWatchlist([]);
     setCurrentlyWatching([]);
     setWatched([]);
     setReviews([]);
+    setActivity([]);
     setFriends([]);
     setFriendRequests([]);
     setConversations([]);
-    setActivity([]);
-    setUnreadMessageCount(0);
-    setUnreadMessageCounts({});
     setError(null);
-    // Also clear any persisted cache for lists and deprecated combined key
-    try {
-      await AsyncStorage.multiRemove([
-        'watchlist',
-        'currentlyWatching',
-        'watched',
-        'reviews',
-        'userData',
-        'lastSync'
-      ]);
-      console.log('Cleared cached user data from AsyncStorage');
-    } catch (e) {
-      console.warn('Failed to clear cached user data from AsyncStorage:', e);
-    }
+    // Do not clear AsyncStorage here to preserve data for when the user logs back in
   };
 
   const refreshData = async () => {
@@ -897,6 +988,46 @@ export const AppProvider = ({ children }) => {
     return Array.isArray(reviews) && reviews.find(r => r.movieId === movieId);
   };
 
+  // Post creation function
+  const createPost = async (postData) => {
+    try {
+      const response = await BackendService.makeRequest('/activity/create-post', {
+        method: 'POST',
+        body: JSON.stringify(postData),
+      });
+
+      if (response.success) {
+        // Add the new post to local activity state for immediate UI update
+        // Normalize to UI schema expected by ProfileScreen
+        const movie = postData.movie || null;
+        const newPost = {
+          id: response.post?.id || `post_${Date.now()}`,
+          type: 'post',
+          action: 'created',
+          comment: postData.content,
+          movieId: movie?.id,
+          movieTitle: movie?.title || movie?.name,
+          moviePoster: movie?.poster_path,
+          userId: postData.userId,
+          createdAt: new Date().toISOString(),
+          reactions: 0,
+          comments: 0,
+          // preserve original payload for reference
+          ...postData,
+        };
+
+        setActivity(prev => [newPost, ...prev]);
+        
+        return { success: true, post: newPost };
+      } else {
+        return { success: false, error: response.error || 'Failed to create post' };
+      }
+    } catch (error) {
+      console.error('Error creating post:', error);
+      return { success: false, error: error.message };
+    }
+  };
+
   const value = {
     // Movie lists
     watchlist,
@@ -926,6 +1057,7 @@ export const AppProvider = ({ children }) => {
     getConversation,
     sendMessage,
     shareMovie,
+    createPost,
     
     // Notification management
     unreadMessageCount,

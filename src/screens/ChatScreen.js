@@ -32,6 +32,7 @@ const ChatScreen = ({ route, navigation }) => {
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const scrollViewRef = useRef();
+  const [headerHeight, setHeaderHeight] = useState(0);
 
   useEffect(() => {
     loadConversation();
@@ -148,7 +149,27 @@ const ChatScreen = ({ route, navigation }) => {
 
     const messageTime = new Date(message.createdAt);
     const timeString = messageTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const displayText = message.text ?? message.message ?? '';
+    let displayText = message.text ?? message.message ?? '';
+
+    // Resolve movie payload robustly
+    const moviePayload = message.movieData || message.movie || null;
+    const normalizedMovie = moviePayload ? {
+      id: moviePayload.id || moviePayload.tmdb_id || moviePayload.tmdbId || moviePayload.movie_id,
+      title: moviePayload.title || moviePayload.name || message.movie_title || message.show_title,
+      name: moviePayload.name || moviePayload.title,
+      poster_path: moviePayload.poster_path || moviePayload.poster || message.show_poster_path || message.poster_path || message.movie_poster || null,
+      release_date: moviePayload.release_date || moviePayload.first_air_date,
+      first_air_date: moviePayload.first_air_date || moviePayload.release_date,
+    } : null;
+
+    // If backend text degraded to an ID, replace with human-friendly label
+    if (isMovieShare) {
+      const looksLikeId = typeof displayText === 'number' || (/^\d+$/.test(String(displayText).trim()));
+      if (!displayText || looksLikeId) {
+        const titleForText = normalizedMovie?.title || normalizedMovie?.name || 'a movie';
+        displayText = `Recommended: ${titleForText}`;
+      }
+    }
 
     return (
       <View key={message.id || index} style={[
@@ -174,24 +195,24 @@ const ChatScreen = ({ route, navigation }) => {
               
               <TouchableOpacity 
                 style={styles.movieInfo}
-                onPress={() => navigation.navigate('MovieDetail', { movie: message.movieData })}
+                onPress={() => navigation.navigate('MovieDetail', { movie: normalizedMovie || message.movieData || message.movie })}
               >
-                {message.movieData?.poster_path && (
+                {normalizedMovie?.poster_path && (
                   <Image
                     source={{ 
-                      uri: `https://image.tmdb.org/t/p/w92${message.movieData.poster_path}` 
+                      uri: `https://image.tmdb.org/t/p/w92${normalizedMovie.poster_path}` 
                     }}
                     style={styles.moviePoster}
                   />
                 )}
                 <View style={styles.movieDetails}>
                   <Text style={[styles.movieTitle, { color: isOwnMessage ? "#FFFFFF" : "#1F2937" }]}>
-                    {message.movieData?.title || message.movieData?.name || 'Unknown Movie'}
+                    {normalizedMovie?.title || normalizedMovie?.name || 'Unknown Movie'}
                   </Text>
-                  {(message.movieData?.release_date || message.movieData?.first_air_date) && (
-                    <Text style={[styles.movieYear, { color: isOwnMessage ? "#E5E7EB" : "#6B7280" }]}>
-                      {message.movieData?.release_date?.split('-')[0] || 
-                       message.movieData?.first_air_date?.split('-')[0]}
+                  {(normalizedMovie?.release_date || normalizedMovie?.first_air_date) && (
+                    <Text style={[styles.movieYear, { color: isOwnMessage ? "#E5E7EB" : "#6B7280" }]}> 
+                      {normalizedMovie?.release_date?.split('-')[0] || 
+                       normalizedMovie?.first_air_date?.split('-')[0]}
                     </Text>
                   )}
                 </View>
@@ -238,10 +259,13 @@ const ChatScreen = ({ route, navigation }) => {
     <KeyboardAvoidingView 
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 25 : 0}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? headerHeight : 0}
     >
       {/* Header */}
-      <View style={[styles.header, { paddingTop: (insets?.top || 0) + 12 }]}>
+      <View 
+        style={[styles.header, { paddingTop: (insets?.top || 0) + 12 }]}
+        onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
+      >
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => navigation.goBack()}
@@ -271,6 +295,10 @@ const ChatScreen = ({ route, navigation }) => {
         ref={scrollViewRef}
         style={styles.messagesContainer}
         contentContainerStyle={styles.messagesContent}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+        contentInset={{ bottom: Math.max(insets.bottom, 12) }}
+        contentInsetAdjustmentBehavior="automatic"
         onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
       >
         {messages.length > 0 ? (

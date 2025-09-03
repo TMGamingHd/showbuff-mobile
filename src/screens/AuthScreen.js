@@ -177,6 +177,8 @@ const AuthScreen = () => {
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
                 autoCorrect={false}
+                textContentType={Platform.OS === 'ios' ? (isLogin ? 'password' : 'none') : 'password'}
+                autoComplete={isLogin ? 'password' : 'off'}
               />
               <TouchableOpacity
                 style={styles.eyeButton}
@@ -207,6 +209,8 @@ const AuthScreen = () => {
                   secureTextEntry={!showConfirmPassword}
                   autoCapitalize="none"
                   autoCorrect={false}
+                  textContentType={Platform.OS === 'ios' ? 'none' : 'password'}
+                  autoComplete="off"
                 />
                 <TouchableOpacity
                   style={styles.eyeButton}

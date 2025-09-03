@@ -8,31 +8,19 @@ class BackendService {
     // Get environment variables from Expo Constants (support both new and legacy fields)
     const env = (Constants.expoConfig?.extra) || (Constants.manifest?.extra) || {};
     
-    const isAndroid = Platform.OS === 'android';
     // More reliable physical device detection
     const isPhysicalDevice = Constants.isDevice === true;
     
-    // Use deployed backend for production, local for development
-    const PRODUCTION_BACKEND_URL = 'https://showbuff-production.up.railway.app/api';
+    // Resolve base URL depending on simulator vs device and Expo host IP
+    this.baseURL = this.computeBaseURL(env, isPhysicalDevice);
     
-    // Force production backend for now (environment variables not loading correctly)
-    this.baseURL = PRODUCTION_BACKEND_URL;
-    
-    // Debug environment variables
+    // Debug info
     console.log('Environment variables:', env);
-    console.log('USE_PRODUCTION_BACKEND:', env.USE_PRODUCTION_BACKEND);
-    
     console.log(`BackendService initialized with baseURL: ${this.baseURL}`);
     console.log('Platform:', Platform.OS);
     console.log('Is Physical Device:', isPhysicalDevice);
-    console.log('Constants.isDevice:', Constants.isDevice);
-    console.log('Constants.appOwnership:', Constants.appOwnership);
-    console.log('Constants.executionEnvironment:', Constants.executionEnvironment);
-    console.log('Constants.platform:', Constants.platform);
-    console.log('Environment variables available:', Object.keys(env).join(', '));
-    
-    // Remove old fallback logic that was overriding the production URL
-    console.log('FINAL baseURL being used:', this.baseURL);
+    const hostUri = (Constants.expoConfig?.hostUri) || (Constants.manifest?.hostUri) || (Constants.manifest?.debuggerHost);
+    console.log('Expo hostUri/debuggerHost:', hostUri);
     
     this.token = null;
     this.demoMode = false;
@@ -459,6 +447,39 @@ class BackendService {
   async getActivity() {
     return await this.getFriendsActivity();
   }
+  
+  async getSocialFeed() {
+    return await this.makeRequest('/api/feed/social');
+  }
+
+  // Post interactions
+  async likePost(postId) {
+    return await this.makeRequest(`/api/posts/${postId}/like`, {
+      method: 'POST',
+    });
+  }
+
+  async addPostComment(postId, text) {
+    return await this.makeRequest(`/api/posts/${postId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    });
+  }
+
+  async getPostComments(postId, options = {}) {
+    const params = new URLSearchParams();
+    if (options.sort) params.append('sort', options.sort);
+    if (options.limit) params.append('limit', String(options.limit));
+    const qs = params.toString();
+    const path = qs ? `/api/posts/${postId}/comments?${qs}` : `/api/posts/${postId}/comments`;
+    return await this.makeRequest(path);
+  }
+
+  async likeComment(postId, commentId) {
+    return await this.makeRequest(`/api/posts/${postId}/comments/${commentId}/like`, {
+      method: 'POST',
+    });
+  }
 
   // Chat/messaging methods
   async getConversations() {
@@ -641,6 +662,18 @@ class BackendService {
     }
   }
 
+  async clearStoredAuth() {
+    try {
+      const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
+      await AsyncStorage.removeItem('authToken');
+      await AsyncStorage.removeItem('userData');
+      this.token = null;
+      console.log('Cleared stored authentication for backend switch');
+    } catch (error) {
+      console.error('Error clearing stored auth:', error);
+    }
+  }
+
   async markMessagesAsRead(friendId) {
     console.log('Marking messages as read for friend:', friendId);
     return await this.makeRequest(`/api/messages/mark-read/${friendId}`, {
@@ -689,6 +722,61 @@ class BackendService {
   // Missing methods that were causing 500 errors
   async getConversation(friendId) {
     return await this.getMessages(friendId);
+  }
+
+  // Helper methods for resolving correct backend base URL in development
+  computeBaseURL(env, isPhysicalDevice) {
+    try {
+      const useProd = env.USE_PRODUCTION_BACKEND === true || env.USE_PRODUCTION_BACKEND === 'true';
+      if (useProd) {
+        return 'https://showbuff-production.up.railway.app/api';
+      }
+
+      const platform = Platform.OS;
+
+      // Simulators/Emulators talk to host machine via special loopback addresses
+      if (platform === 'ios' && !isPhysicalDevice) {
+        return 'http://127.0.0.1:3001/api';
+      }
+      if (platform === 'android' && !isPhysicalDevice) {
+        // Android emulator maps host loopback to 10.0.2.2
+        return 'http://10.0.2.2:3001/api';
+      }
+
+      // Physical device: derive LAN IP from Expo host when possible
+      const host = this.getExpoHostIp(env);
+      if (host) {
+        return `http://${host}:3001/api`;
+      }
+
+      // Final fallback (update to your LAN IP if needed)
+      console.warn('[BackendService] Could not determine LAN IP from Expo. Falling back to http://192.168.68.100:3001/api. Set extra.LOCAL_LAN_IP in app config to override.');
+      return 'http://192.168.68.100:3001/api';
+    } catch (e) {
+      console.warn('[BackendService] Error computing base URL, defaulting to http://127.0.0.1:3001/api', e);
+      return 'http://127.0.0.1:3001/api';
+    }
+  }
+
+  getExpoHostIp(env) {
+    try {
+      // Prefer explicit override via app config extra
+      const override = env.LOCAL_LAN_IP || env.LAN_IP || env.BACKEND_LAN_IP;
+      if (override && typeof override === 'string') {
+        const ip = override.split(':')[0].trim();
+        if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(ip)) return ip;
+      }
+
+      // Try to read from Expo host URI (e.g., "192.168.68.103:8081")
+      const hostUri = (Constants.expoConfig?.hostUri) || (Constants.manifest?.hostUri) || (Constants.manifest?.debuggerHost);
+      if (typeof hostUri === 'string') {
+        const host = hostUri.split('@').pop()?.split(':')[0]; // supports tunnel URLs like "exp://exp.host/@user/app+GUID"
+        if (host && /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) {
+          return host;
+        }
+      }
+    } catch (_) {}
+    return null;
   }
 }
 

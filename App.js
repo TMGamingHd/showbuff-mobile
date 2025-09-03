@@ -19,10 +19,12 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import TMDBService from './src/services/tmdb';
 import BackendService from './src/services/backend';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
 import { AppProvider, useApp } from './src/contexts/AppContext';
-import AuthScreen from './src/screens/AuthScreen';
 import SocialFeedScreen from './src/screens/SocialFeedScreen';
+import PostCreationModal from './src/components/PostCreationModal';
+import AuthScreen from './src/screens/AuthScreen';
 import ReviewWriteScreen from './src/screens/ReviewWriteScreen';
 import WatchlistScreen from './src/screens/WatchlistScreen';
 import MovieDetailScreen from './src/screens/MovieDetailScreen';
@@ -33,7 +35,6 @@ import ProfileScreen from './src/screens/ProfileScreen';
 import MovieShareScreen from './src/screens/MovieShareScreen';
 import PopularMoviesScreen from './src/screens/PopularMoviesScreen';
 import NotificationsScreen from './src/screens/NotificationsScreen';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { dbToClient, listLabel } from './src/utils/lists';
 import { showToast } from './src/utils/toast';
 import { showMoveDialog } from './src/utils/moveDialog';
@@ -86,7 +87,8 @@ const HomeScreen = () => {
   const { user } = useAuth();
   const [socialFeed, setSocialFeed] = useState([]);
   const [trendingMovies, setTrendingMovies] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [showPostModal, setShowPostModal] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const insets = useSafeAreaInsets();
 
@@ -161,45 +163,12 @@ const HomeScreen = () => {
   };
 
   const handleMoviePress = (movie) => {
-    const actions = [
-      {
-        text: 'Add to Watchlist',
-        onPress: async () => {
-          if (isInList(movie.id, 'watchlist')) {
-            showToast('Already in Watchlist');
-            return;
-          }
-          await handleAddWithConflict(movie, 'watchlist');
-        }
-      },
-      {
-        text: 'Add to Currently Watching',
-        onPress: async () => {
-          if (isInList(movie.id, 'currently_watching')) {
-            showToast('Already in Currently Watching');
-            return;
-          }
-          await handleAddWithConflict(movie, 'currently_watching');
-        }
-      },
-      {
-        text: 'Mark as Watched',
-        onPress: async () => {
-          if (isInList(movie.id, 'watched')) {
-            showToast('Already in Watched');
-            return;
-          }
-          await handleAddWithConflict(movie, 'watched');
-        }
-      },
-      { text: 'Cancel', style: 'cancel' }
-    ];
+    navigation.navigate('MovieDetail', { movie });
+  };
 
-    Alert.alert(
-      movie.title || movie.name,
-      `${movie.overview}\n\nRating: ${TMDBService.formatVoteAverage(movie.vote_average)}/10\nRelease: ${TMDBService.getYear(movie.release_date || movie.first_air_date)}`,
-      actions
-    );
+  const handlePostCreated = (newPost) => {
+    // Refresh the social feed to show the new post
+    loadSocialFeed();
   };
 
   const renderMovieItem = ({ item }) => {
@@ -305,16 +274,27 @@ const HomeScreen = () => {
         />
       )}
       
-      {/* Quick Review Floating Action Button */}
+      {/* Create Post Floating Action Button */}
       <TouchableOpacity 
         style={styles.quickReviewFAB}
         onPress={() => {
-          showToast('Quick Review feature coming soon!');
+          console.log('=== FAB PRESSED ===');
+          console.log('Current showPostModal state:', showPostModal);
+          console.log('Setting showPostModal to true');
+          setShowPostModal(true);
+          console.log('PostCreationModal should open now');
         }}
         activeOpacity={0.8}
       >
         <Ionicons name="add" size={28} color="#FFFFFF" />
       </TouchableOpacity>
+
+      {/* Post Creation Modal */}
+      <PostCreationModal
+        visible={showPostModal}
+        onClose={() => setShowPostModal(false)}
+        onPostCreated={handlePostCreated}
+      />
     </View>
   );
 };

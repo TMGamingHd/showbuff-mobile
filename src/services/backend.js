@@ -40,7 +40,7 @@ class BackendService {
       path = path.slice(4); // remove leading '/api'
     }
     const url = `${base}${path}`;
-    console.log(`Full URL: ${url}`);
+    console.log(`[BackendService] Full URL: ${url}`);
     
     const config = {
       ...options,
@@ -50,6 +50,10 @@ class BackendService {
         ...(options.headers || {}),
       },
     };
+
+    // Debug logging
+    console.log(`[BackendService] Headers:`, config.headers);
+    console.log(`[BackendService] Method: ${options.method || 'GET'}`);
 
     // Create a timeout promise that rejects after this.timeout milliseconds
     const timeoutPromise = new Promise((_, reject) => {
@@ -459,6 +463,14 @@ class BackendService {
     });
   }
 
+  // Create a new post with optional movie data
+  async createPost(postData) {
+    return await this.makeRequest('/api/activity/create-post', {
+      method: 'POST',
+      body: JSON.stringify(postData)
+    });
+  }
+
   async addPostComment(postId, text) {
     return await this.makeRequest(`/api/posts/${postId}/comments`, {
       method: 'POST',
@@ -724,14 +736,16 @@ class BackendService {
     return await this.getMessages(friendId);
   }
 
-  // Helper methods for resolving correct backend base URL in development
+  // Helper methods for resolving correct backend base URL
   computeBaseURL(env, isPhysicalDevice) {
     try {
-      const useProd = env.USE_PRODUCTION_BACKEND === true || env.USE_PRODUCTION_BACKEND === 'true';
+      // Default to production backend unless explicitly set to false
+      const useProd = env.USE_PRODUCTION_BACKEND !== 'false';
       if (useProd) {
         return 'https://showbuff-production.up.railway.app/api';
       }
 
+      // Development mode - local backend
       const platform = Platform.OS;
 
       // Simulators/Emulators talk to host machine via special loopback addresses
@@ -749,9 +763,9 @@ class BackendService {
         return `http://${host}:3001/api`;
       }
 
-      // Final fallback (update to your LAN IP if needed)
-      console.warn('[BackendService] Could not determine LAN IP from Expo. Falling back to http://192.168.68.100:3001/api. Set extra.LOCAL_LAN_IP in app config to override.');
-      return 'http://192.168.68.100:3001/api';
+      // Fallback to production if we can't determine local IP
+      console.warn('[BackendService] Could not determine local development URL. Falling back to production backend.');
+      return 'https://showbuff-production.up.railway.app/api';
     } catch (e) {
       console.warn('[BackendService] Error computing base URL, defaulting to http://127.0.0.1:3001/api', e);
       return 'http://127.0.0.1:3001/api';

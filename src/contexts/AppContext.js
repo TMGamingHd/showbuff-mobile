@@ -991,7 +991,7 @@ export const AppProvider = ({ children }) => {
   // Post creation function
   const createPost = async (postData) => {
     try {
-      const response = await BackendService.makeRequest('/activity/create-post', {
+      const response = await BackendService.makeRequest('/api/activity/create-post', {
         method: 'POST',
         body: JSON.stringify(postData),
       });

@@ -22,11 +22,26 @@ const {
   upsertShow,
 } = require('./data');
 
+// Helper function to ensure user has an activity feed
+const ensureUserActivity = (userId) => {
+  if (!activities.has(userId)) {
+    activities.set(userId, []);
+  }
+  return activities.get(userId);
+};
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Enable CORS and JSON parsing
 app.use(cors());
 app.use(express.json());
+
+// Log all incoming requests
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  next();
+});
 
 // Basic request logger
 app.use((req, _res, next) => {
@@ -527,6 +542,69 @@ app.get('/api/friends/:friendId/movies', requireAuth, (req, res) => {
 });
 
 // ===== Activity =====
+// Log all registered routes for debugging
+app._router.stack.forEach((r) => {
+  if (r.route && r.route.path) {
+    console.log(`[Route Registered] ${Object.keys(r.route.methods).join(', ').toUpperCase()} ${r.route.path}`);
+  }
+});
+
+// Create a new post
+app.post('/api/activity/create-post', requireAuth, (req, res) => {
+  const { content, type = 'text_post', movie, visibility = 'public' } = req.body || {};
+  const trimmed = (content || '').trim();
+  
+  if (!trimmed && !movie) {
+    return res.status(400).json({ success: false, error: 'Content or movie is required' });
+  }
+
+  // Get user info
+  const user = users.get(req.userId);
+  if (!user) {
+    return res.status(404).json({ success: false, error: 'User not found' });
+  }
+
+  // Process movie data if provided
+  let postMovie;
+  if (movie && typeof movie === 'object') {
+    postMovie = {
+      id: Number(movie.id) || movie.id,
+      title: movie.title || movie.name || 'Unknown Movie',
+      poster_path: movie.poster_path || null,
+      vote_average: typeof movie.vote_average === 'number' ? movie.vote_average : Number(movie.vote_average) || undefined,
+      listType: movie.listType
+    };
+  }
+  
+  const post = {
+    id: `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    type,
+    userId: req.userId,
+    userName: user.username,
+    userEmail: user.email,
+    content: trimmed,
+    movie: postMovie,
+    visibility,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    likes: [],
+    comments: []
+  };
+  
+  // Add to global feed
+  const global = activities.get('global') || [];
+  activities.set('global', [post, ...global].slice(0, 100));
+  
+  // Add to user's feed
+  const userFeed = ensureUserActivity(req.userId);
+  userFeed.unshift(post);
+  activities.set(req.userId, userFeed.slice(0, 50));
+  
+  console.log(`[Server] Created new ${type} post for user ${req.userId}`);
+  res.status(201).json({ success: true, post });
+});
+
+// Get user activity feed
 app.get('/api/user/:userId/activity', requireAuth, (req, res) => {
   const uid = Number(req.params.userId);
   const l = ensureUserLists(uid);
@@ -537,71 +615,26 @@ app.get('/api/user/:userId/activity', requireAuth, (req, res) => {
   res.json(acts);
 });
 
+// Get friend activity feed
 app.get('/api/user/activity', requireAuth, (req, res) => {
   const me = req.userId;
   const fs = friends.get(me) || [];
   const acts = [];
   for (const f of fs) {
     const l = ensureUserLists(f.id);
-    for (const [k, arr] of Object.entries(l))
-      for (const s of arr) acts.push({ userId: f.id, type: 'list_update', list: k, showId: s.id, at: new Date().toISOString() });
+    for (const [k, arr] of Object.entries(l)) {
+      for (const s of arr) {
+        acts.push({ 
+          userId: f.id, 
+          type: 'list_update', 
+          list: k, 
+          showId: s.id, 
+          at: new Date().toISOString() 
+        });
+      }
+    }
   }
   res.json(acts);
-});
-
-// Create a new post
-app.post('/api/activity/create-post', requireAuth, (req, res) => {
-  const { content, type = 'text_post', movie, visibility = 'public' } = req.body || {};
-
-  const trimmed = (content || '').trim();
-  if (!trimmed) {
-    return res.status(400).json({ success: false, error: 'Content is required' });
-  }
-
-  const user = getUserById(req.userId);
-  if (!user) {
-    return res.status(404).json({ success: false, error: 'User not found' });
-  }
-
-  // Normalize optional movie payload if provided
-  let postMovie = undefined;
-  if (movie && typeof movie === 'object') {
-    // Only include commonly used fields for the feed UI
-    postMovie = {
-      id: Number(movie.id) || movie.id,
-      title: movie.title || movie.name || 'Unknown Movie',
-      poster_path: movie.poster_path || null,
-      vote_average: typeof movie.vote_average === 'number' ? movie.vote_average : Number(movie.vote_average) || undefined,
-      listType: movie.listType || undefined,
-    };
-  }
-
-  const post = {
-    id: `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-    type: type,
-    action: 'created_post',
-    userId: req.userId,
-    userName: user.username,
-    userEmail: user.email,
-    content: trimmed,
-    movie: postMovie, // May be undefined for text-only posts
-    createdAt: new Date().toISOString(),
-    visibility: visibility || 'public',
-    reactions: [],
-    comments: [],
-  };
-
-  // Add to global activity feed
-  const globalActivity = activities.get('global') || [];
-  globalActivity.unshift(post);
-  activities.set('global', globalActivity.slice(0, 100)); // Keep last 100 activities
-
-  // Add to user's personal activity feed
-  const userActivities = activities.get(req.userId) || [];
-  userActivities.unshift(post);
-  activities.set(req.userId, userActivities.slice(0, 50)); // Keep last 50 user activities
-
-  res.json({ success: true, post });
 });
 
 // Utility to update a post across global and owner activity lists
@@ -887,9 +920,28 @@ app.get('/api/feed/social', requireAuth, (req, res) => {
   res.json(socialFeed.slice(0, 20)); // Return latest 20 items
 });
 
-// Always start the server (works for both local and deployed environments)
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`ShowBuff mock backend listening on http://0.0.0.0:${PORT}`);
-});
+// Function to start the server
+const startServer = () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`ShowBuff mock backend listening on http://0.0.0.0:${PORT}`);
+    
+    // Log all registered routes after server starts
+    console.log('\n=== Registered Routes ===');
+    app._router.stack
+      .filter(r => r.route)
+      .map(r => {
+        const method = Object.keys(r.route.methods)[0].toUpperCase();
+        console.log(`${method} ${r.route.path}`);
+      });
+    console.log('=======================\n');
+  });
 
-module.exports = app;
+  return server;
+};
+
+// Only start the server if this file is run directly (not required)
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { app, startServer };

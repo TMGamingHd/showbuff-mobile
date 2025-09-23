@@ -11,6 +11,7 @@ import {
   SectionList,
   Modal,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../contexts/AppContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -29,7 +30,8 @@ const ProfileScreen = ({ navigation }) => {
     loading,
     error,
     refreshData,
-    refreshing
+    refreshing,
+    hydrateActivityFromCache
   } = useApp();
   const { user, signOut, loading: authLoading } = useAuth();
   const insets = useSafeAreaInsets();
@@ -38,6 +40,65 @@ const ProfileScreen = ({ navigation }) => {
   const [selectedMovie, setSelectedMovie] = useState(null);
   const [actionModalVisible, setActionModalVisible] = useState(false);
   const [shareModalVisible, setShareModalVisible] = useState(false);
+  const [debugExpanded, setDebugExpanded] = useState(false);
+  const [debugInfo, setDebugInfo] = useState({ keys: {}, counts: {} });
+
+  const getPerUserKey = (key) => (user?.id ? `${user.id}_${key}` : key);
+
+  const refreshDebugInfo = async () => {
+    try {
+      const keys = {
+        watchlist: getPerUserKey('watchlist'),
+        currentlyWatching: getPerUserKey('currentlyWatching'),
+        watched: getPerUserKey('watched'),
+        reviews: getPerUserKey('reviews'),
+        activity: getPerUserKey('activity'),
+      };
+      const results = await Promise.all(
+        Object.values(keys).map((k) => AsyncStorage.getItem(k))
+      );
+      const counts = {};
+      Object.keys(keys).forEach((name, idx) => {
+        try {
+          const arr = results[idx] ? JSON.parse(results[idx]) : [];
+          counts[name] = Array.isArray(arr) ? arr.length : 0;
+        } catch (_) {
+          counts[name] = 0;
+        }
+      });
+      console.log('[Profile Debug] Keys:', keys, 'Counts:', counts);
+      setDebugInfo({ keys, counts });
+    } catch (e) {
+      console.warn('[Profile Debug] Failed to load debug info:', e);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'activity') {
+      refreshDebugInfo();
+    }
+  }, [activeTab, user?.id]);
+
+  const forceSaveActivity = async () => {
+    try {
+      const key = getPerUserKey('activity');
+      await AsyncStorage.setItem(key, JSON.stringify(activity || []));
+      console.log('[Profile Debug] Force-saved activity to', key, 'len=', Array.isArray(activity) ? activity.length : 0);
+      await refreshDebugInfo();
+    } catch (e) {
+      console.warn('[Profile Debug] Force save failed:', e);
+    }
+  };
+
+  const forceLoadActivity = async () => {
+    try {
+      const meta = await hydrateActivityFromCache?.();
+      console.log('[Profile Debug] Force-loaded activity from cache:', meta);
+      await refreshDebugInfo();
+    } catch (e) {
+      console.warn('[Profile Debug] Force load failed:', e);
+    }
+  };
 
   const getActivityIcon = (activityType, action) => {
     if (activityType === 'list') {
@@ -343,6 +404,17 @@ const ProfileScreen = ({ navigation }) => {
     </View>
   );
 
+  // Filter out only truly empty/placeholder activity items; allow unknowns with meaningful context
+  const isMeaningfulActivity = (item) => {
+    if (!item) return false;
+    const type = (item.type || '').toString().toLowerCase();
+    if (type === 'post' || type === 'movie_post' || type === 'text_post' || type === 'movie_share') return true;
+    if (type === 'review') return !!(item.movieTitle || item.movieId || item.moviePoster || item.rating || item.comment);
+    if (type === 'list') return !!(item.action && (item.movieTitle || item.movieId || item.moviePoster));
+    // For unknown types, show if there's any useful info
+    return !!(item.action || item.comment || item.content || item.movieTitle || item.movieId || item.createdAt);
+  };
+
   const getListData = () => {
     switch (activeTab) {
       case 'watchlist':
@@ -433,8 +505,34 @@ const ProfileScreen = ({ navigation }) => {
           }}
         />
       ) : (
+        <>
+        {(__DEV__) && (
+          <View style={styles.debugPanel}>
+            <TouchableOpacity onPress={() => setDebugExpanded(v => !v)}>
+              <Text style={styles.debugTitle}>Activity Debug Panel {debugExpanded ? '▾' : '▸'}</Text>
+            </TouchableOpacity>
+            {debugExpanded && (
+              <View style={styles.debugBody}>
+                <Text style={styles.debugText}>User ID: {String(user?.id || 'n/a')}</Text>
+                <Text style={styles.debugText}>Key (activity): {getPerUserKey('activity')}</Text>
+                <View style={styles.debugRow}>
+                  <TouchableOpacity style={styles.debugButton} onPress={refreshDebugInfo}>
+                    <Text style={styles.debugButtonText}>Refresh Keys</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.debugButton} onPress={forceSaveActivity}>
+                    <Text style={styles.debugButtonText}>Force Save</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.debugButton} onPress={forceLoadActivity}>
+                    <Text style={styles.debugButtonText}>Force Load</Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.debugText}>Counts: act={debugInfo.counts.activity || 0}, wl={debugInfo.counts.watchlist || 0}, cw={debugInfo.counts.currentlyWatching || 0}, wd={debugInfo.counts.watched || 0}</Text>
+              </View>
+            )}
+          </View>
+        )}
         <SectionList
-          sections={groupActivitiesByDate(activity)}
+          sections={groupActivitiesByDate((activity || []).filter(isMeaningfulActivity))}
           keyExtractor={(item, index) => item.id || `activity-${index}`}
           renderItem={renderActivityItem}
           renderSectionHeader={renderActivityHeader}
@@ -451,6 +549,7 @@ const ProfileScreen = ({ navigation }) => {
             </View>
           }
         />
+        </>
       )}
       {/* Action Modal */}
       <Modal

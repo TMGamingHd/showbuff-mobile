@@ -24,14 +24,14 @@ import { showMoveDialog } from '../utils/moveDialog';
 import PostCreationModal from '../components/PostCreationModal';
 
 const SocialFeedScreen = ({ navigation }) => {
-  const { addToList, moveToList, isInList, unreadMessageCount, loadNotifications } = useApp();
+  const { addToList, moveToList, isInList, totalUnreadNotifications, loadNotifications } = useApp();
   const { user } = useAuth();
   const [socialFeed, setSocialFeed] = useState([]);
   const [trendingMovies, setTrendingMovies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showPostModal, setShowPostModal] = useState(false);
-  const [commentsModal, setCommentsModal] = useState({ visible: false, post: null, comments: [], sort: 'top', loading: false, text: '' });
+  const [commentsModal, setCommentsModal] = useState({ visible: false, post: null, comments: [], loading: false, text: '' });
   const insets = useSafeAreaInsets();
 
   const currentUserId = user?.id || user?.userId || user?._id || user?.uid;
@@ -45,6 +45,9 @@ const SocialFeedScreen = ({ navigation }) => {
       
       // Set trending movies for "Popular This Week" section
       setTrendingMovies((trendingData.results || []).slice(0, 8));
+      
+      // Refresh notifications when loading social feed
+      await loadNotifications();
       
       // Fetch real social feed from backend and merge with existing without deleting
       const res = await BackendService.getSocialFeed();
@@ -86,12 +89,38 @@ const SocialFeedScreen = ({ navigation }) => {
   const getTopComments = (post) => {
     const arr = Array.isArray(post?.comments) ? [...post.comments] : [];
     arr.sort((a, b) => {
-      const la = Array.isArray(a.likes) ? a.likes.length : 0;
-      const lb = Array.isArray(b.likes) ? b.likes.length : 0;
+      const la = a.likeCount || 0;
+      const lb = b.likeCount || 0;
       if (lb !== la) return lb - la;
       return new Date(b.createdAt) - new Date(a.createdAt);
     });
     return arr.slice(0, 3);
+  };
+
+  const formatCommentTime = (createdAt) => {
+    const now = new Date();
+    const commentTime = new Date(createdAt);
+    const diffMs = now - commentTime;
+    const diffMins = Math.floor(diffMs / (1000 * 60));
+    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffMins < 1) return 'now';
+    if (diffMins < 60) return `${diffMins}m`;
+    if (diffHours < 24) return `${diffHours}h`;
+    if (diffDays < 7) return `${diffDays}d`;
+    
+    // Show actual date for older comments
+    return commentTime.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  };
+
+  const getUserInitials = (userName) => {
+    if (!userName) return 'U';
+    const names = userName.split(' ');
+    if (names.length >= 2) {
+      return (names[0][0] + names[1][0]).toUpperCase();
+    }
+    return userName.slice(0, 2).toUpperCase();
   };
 
   const renderCommentsPreview = (post) => {
@@ -100,24 +129,50 @@ const SocialFeedScreen = ({ navigation }) => {
     return (
       <View style={styles.commentsPreview}>
         {top.map((c) => {
-          const likes = Array.isArray(c.likes) ? c.likes.length : 0;
-          const liked = Array.isArray(c.likes) && c.likes.some(uid => Number(uid) === Number(currentUserId));
+          const likes = c.likeCount || 0;
+          const liked = c.liked || false;
           return (
-            <View key={c.id} style={styles.commentRow}>
-              <View style={styles.commentBubble}>
-                <Text style={styles.commentUser}>{c.userName}</Text>
-                <Text style={styles.commentText} numberOfLines={2}>{c.text}</Text>
+            <View key={c.id} style={styles.commentPreviewRow}>
+              <View style={styles.commentAvatar}>
+                <Text style={styles.commentAvatarText}>{getUserInitials(c.userName)}</Text>
               </View>
-              <TouchableOpacity style={styles.commentLikeBtn} onPress={() => handleLikeCommentInline(post, c)}>
-                <Ionicons name={liked ? 'heart' : 'heart-outline'} size={14} color={liked ? '#EF4444' : '#6B7280'} />
-                <Text style={[styles.commentLikeText, liked && { color: '#EF4444' }]}>{likes}</Text>
-              </TouchableOpacity>
+              <View style={styles.commentContent}>
+                <View style={styles.commentHeader}>
+                  <Text style={styles.commentUserName}>{c.userName}</Text>
+                  <Text style={styles.commentTime}>{formatCommentTime(c.createdAt)}</Text>
+                </View>
+                <Text style={styles.commentPreviewText} numberOfLines={2}>{c.text}</Text>
+                <View style={styles.commentActions}>
+                  <TouchableOpacity 
+                    style={styles.commentLikeBtn} 
+                    onPress={() => handleLikeCommentInline(post, c)}
+                  >
+                    <Ionicons 
+                      name={liked ? 'heart' : 'heart-outline'} 
+                      size={12} 
+                      color={liked ? '#EF4444' : '#8E8E93'} 
+                    />
+                    {likes > 0 && (
+                      <Text style={[styles.commentLikeCount, liked && { color: '#EF4444' }]}>
+                        {likes}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </View>
             </View>
           );
         })}
-        <TouchableOpacity onPress={() => openCommentsModal(post)}>
-          <Text style={styles.viewAllCommentsText}>View all comments</Text>
-        </TouchableOpacity>
+        {(post.commentCount || post.comments?.length || 0) > 3 && (
+          <TouchableOpacity 
+            style={styles.viewAllCommentsBtn} 
+            onPress={() => openCommentsModal(post)}
+          >
+            <Text style={styles.viewAllCommentsText}>
+              View all {post.commentCount || post.comments?.length || 0} comments
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
     );
   };
@@ -159,10 +214,12 @@ const SocialFeedScreen = ({ navigation }) => {
 
   // ===== Full Comments Modal logic =====
   const openCommentsModal = async (post) => {
-    setCommentsModal({ visible: true, post, comments: [], sort: 'top', loading: true, text: '' });
+    setCommentsModal({ visible: true, post, comments: [], loading: true, text: '' });
     try {
       const res = await BackendService.getPostComments(post.id, { sort: 'top' });
-      const list = Array.isArray(res?.comments) ? res.comments : [];
+      console.log('Comments API response:', res);
+      const list = Array.isArray(res) ? res : (Array.isArray(res?.comments) ? res.comments : []);
+      console.log('Processed comments list:', list);
       setCommentsModal((s) => ({ ...s, loading: false, comments: list }));
     } catch (e) {
       setCommentsModal((s) => ({ ...s, loading: false }));
@@ -171,23 +228,8 @@ const SocialFeedScreen = ({ navigation }) => {
     }
   };
 
-  const closeCommentsModal = () => setCommentsModal({ visible: false, post: null, comments: [], sort: 'top', loading: false, text: '' });
+  const closeCommentsModal = () => setCommentsModal({ visible: false, post: null, comments: [], loading: false, text: '' });
 
-  const changeCommentsSort = async (sort) => {
-    if (!commentsModal.post) return;
-    setCommentsModal((s) => ({ ...s, sort, loading: true }));
-    try {
-      const res = await BackendService.getPostComments(commentsModal.post.id, { sort: sort === 'top' ? 'top' : undefined });
-      let list = Array.isArray(res?.comments) ? res.comments : [];
-      if (sort !== 'top') {
-        // Newest
-        list = [...list].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      }
-      setCommentsModal((s) => ({ ...s, loading: false, comments: list }));
-    } catch (e) {
-      setCommentsModal((s) => ({ ...s, loading: false }));
-    }
-  };
 
   const handleAddCommentInModal = async () => {
     const text = String(commentsModal.text || '').trim();
@@ -198,19 +240,55 @@ const SocialFeedScreen = ({ navigation }) => {
     const postId = commentsModal.post?.id;
     if (!postId) return;
     try {
+      // Clear input immediately for better UX
+      setCommentsModal((s) => ({ ...s, text: '' }));
+      
       const res = await BackendService.addPostComment(postId, text);
-      if (res?.success && res?.post) {
-        // Sync feed post
-        setSocialFeed((prev) => prev.map((p) => (p.id === postId ? res.post : p)));
-        // Reload modal comments as order may change
-        await changeCommentsSort(commentsModal.sort);
-        setCommentsModal((s) => ({ ...s, text: '' }));
+      if (res?.success) {
+        // Create optimistic comment for immediate UI update
+        const newComment = res.comment || {
+          id: `temp-${Date.now()}`,
+          postId,
+          userId: user?.id,
+          userName: user?.username || user?.email || 'You',
+          text,
+          createdAt: new Date().toISOString(),
+          likeCount: 0,
+          liked: false
+        };
+        
+        // Add comment to modal immediately and sort by likes
+        setCommentsModal((s) => {
+          const updatedComments = [newComment, ...(s.comments || [])];
+          // Sort by likes (most liked first), then by creation date
+          updatedComments.sort((a, b) => {
+            const aLikes = a.likeCount || 0;
+            const bLikes = b.likeCount || 0;
+            if (bLikes !== aLikes) return bLikes - aLikes;
+            return new Date(b.createdAt) - new Date(a.createdAt);
+          });
+          return { ...s, comments: updatedComments };
+        });
+        
+        // Update feed post comment count
+        if (res?.post) {
+          setSocialFeed((prev) => prev.map((p) => (p.id === postId ? res.post : p)));
+        } else {
+          // Fallback: increment comment count
+          setSocialFeed((prev) => prev.map((p) => 
+            p.id === postId ? { ...p, comments: (p.comments || 0) + 1, commentCount: (p.commentCount || 0) + 1 } : p
+          ));
+        }
       } else {
         showToast('Failed to add comment');
+        // Restore text on failure
+        setCommentsModal((s) => ({ ...s, text }));
       }
     } catch (e) {
       console.error('Error adding comment:', e);
       Alert.alert('Error', 'Failed to add comment.');
+      // Restore text on error
+      setCommentsModal((s) => ({ ...s, text }));
     }
   };
 
@@ -219,39 +297,63 @@ const SocialFeedScreen = ({ navigation }) => {
     if (!post) return;
     try {
       // Optimistic update in modal
+      const currentLiked = comment.liked || false;
+      const currentCount = comment.likeCount || 0;
+      const newLiked = !currentLiked;
+      const newCount = currentCount + (currentLiked ? -1 : 1);
+      
       setCommentsModal((s) => ({
         ...s,
         comments: (s.comments || []).map((c) => {
           if (c.id !== comment.id) return c;
-          const likes = Array.isArray(c.likes) ? [...c.likes] : [];
-          const idx = likes.findIndex((uid) => Number(uid) === Number(currentUserId));
-          if (idx >= 0) likes.splice(idx, 1);
-          else likes.push(currentUserId);
-          return { ...c, likes };
+          return { ...c, liked: newLiked, likeCount: newCount };
         }),
       }));
 
       const res = await BackendService.likeComment(post.id, comment.id);
-      if (res?.success && res?.post) {
-        // Sync feed post
-        setSocialFeed((prev) => prev.map((p) => (p.id === post.id ? res.post : p)));
-        // Resync modal comment from response comment if provided
-        if (res.comment) {
-          setCommentsModal((s) => ({
-            ...s,
-            comments: (s.comments || []).map((c) => (c.id === comment.id ? res.comment : c)),
-          }));
-        }
+      if (res?.success) {
+        // Update comment with server response and re-sort by likes
+        setCommentsModal((s) => {
+          const updatedComments = (s.comments || []).map((c) => {
+            if (c.id !== comment.id) return c;
+            return { 
+              ...c, 
+              liked: res.liked !== undefined ? res.liked : newLiked, 
+              likeCount: res.likeCount !== undefined ? res.likeCount : newCount 
+            };
+          });
+          // Sort by likes (most liked first), then by creation date
+          updatedComments.sort((a, b) => {
+            const aLikes = a.likeCount || 0;
+            const bLikes = b.likeCount || 0;
+            if (bLikes !== aLikes) return bLikes - aLikes;
+            return new Date(b.createdAt) - new Date(a.createdAt);
+          });
+          return { ...s, comments: updatedComments };
+        });
+      } else {
+        // Revert on failure
+        setCommentsModal((s) => ({
+          ...s,
+          comments: (s.comments || []).map((c) => (c.id === comment.id ? comment : c)),
+        }));
+        showToast('Failed to update like');
       }
     } catch (e) {
-      // No-op; will resync next fetch
+      console.error('Error liking comment:', e);
+      // Revert on error
+      setCommentsModal((s) => ({
+        ...s,
+        comments: (s.comments || []).map((c) => (c.id === comment.id ? comment : c)),
+      }));
+      Alert.alert('Error', 'Failed to update like.');
     }
   };
 
   useEffect(() => {
-    loadSocialFeed();
-    loadNotifications(); // Load notification counts on screen load
-  }, []);
+  loadSocialFeed();
+  loadNotifications(); // Load notification counts on screen load
+}, []);
 
   const handleMoviePress = (movie) => {
     navigation.navigate('MovieDetail', { movie });
@@ -433,7 +535,7 @@ const SocialFeedScreen = ({ navigation }) => {
         return;
       }
       // Sync with server response if provided
-      const updated = res.post || post;
+      const updated = res.post || { ...post, reactions: res.reactions || newReactions };
       setSocialFeed(prev => prev.map(p => p.id === post.id ? updated : p));
     } catch (e) {
       console.error('Error toggling like:', e);
@@ -605,10 +707,10 @@ const SocialFeedScreen = ({ navigation }) => {
           </View>
           <TouchableOpacity style={styles.notificationBtn} onPress={handleNotificationPress}>
             <Ionicons name="notifications-outline" size={24} color="#1F2937" />
-            {unreadMessageCount > 0 && (
+            {totalUnreadNotifications > 0 && (
               <View style={styles.notificationBadge}>
                 <Text style={styles.badgeText}>
-                  {unreadMessageCount > 99 ? '99+' : unreadMessageCount}
+                  {totalUnreadNotifications > 99 ? '99+' : totalUnreadNotifications}
                 </Text>
               </View>
             )}
@@ -650,69 +752,107 @@ const SocialFeedScreen = ({ navigation }) => {
         onRequestClose={closeCommentsModal}
       >
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, { maxHeight: '80%', width: '100%' }]}> 
+          <View style={styles.commentsModalCard}> 
             <View style={styles.commentsHeader}>
+              <View style={styles.modalHandle} />
               <Text style={styles.modalTitle}>Comments</Text>
-              <TouchableOpacity onPress={closeCommentsModal}>
-                <Ionicons name="close" size={22} color="#111827" />
+              <TouchableOpacity onPress={closeCommentsModal} style={styles.closeButton}>
+                <Ionicons name="close" size={24} color="#6B7280" />
               </TouchableOpacity>
             </View>
 
-            <View style={styles.sortTabs}>
-              <TouchableOpacity onPress={() => changeCommentsSort('top')} style={[styles.sortTab, commentsModal.sort === 'top' && styles.sortTabActive]}>
-                <Text style={[styles.sortTabText, commentsModal.sort === 'top' && styles.sortTabTextActive]}>Top</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => changeCommentsSort('new')} style={[styles.sortTab, commentsModal.sort !== 'top' && styles.sortTabActive]}>
-                <Text style={[styles.sortTabText, commentsModal.sort !== 'top' && styles.sortTabTextActive]}>Newest</Text>
-              </TouchableOpacity>
-            </View>
-
-            {commentsModal.loading ? (
-              <View style={{ paddingVertical: 24, alignItems: 'center' }}>
-                <ActivityIndicator color="#3B82F6" />
-              </View>
-            ) : (
-              <FlatList
-                data={commentsModal.comments}
-                keyExtractor={(c) => c.id}
-                style={styles.commentsList}
-                renderItem={({ item: c }) => {
-                  const likes = Array.isArray(c.likes) ? c.likes.length : 0;
-                  const liked = Array.isArray(c.likes) && c.likes.some((uid) => Number(uid) === Number(currentUserId));
-                  return (
-                    <View style={styles.commentRow}>
-                      <View style={styles.commentBubble}>
-                        <Text style={styles.commentUser}>{c.userName}</Text>
-                        <Text style={styles.commentText}>{c.text}</Text>
+            <View style={styles.commentsContainer}>
+              {commentsModal.loading ? (
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator color="#3B82F6" />
+                  <Text style={styles.loadingText}>Loading comments...</Text>
+                </View>
+              ) : (
+                <FlatList
+                  data={commentsModal.comments}
+                  keyExtractor={(c) => c.id}
+                  style={styles.commentsList}
+                  contentContainerStyle={styles.commentsListContent}
+                  showsVerticalScrollIndicator={false}
+                  renderItem={({ item: c }) => {
+                    const likes = c.likeCount || 0;
+                    const liked = c.liked || false;
+                    return (
+                      <View style={styles.commentModalRow}>
+                        <View style={styles.commentModalAvatar}>
+                          <Text style={styles.commentModalAvatarText}>{getUserInitials(c.userName)}</Text>
+                        </View>
+                        <View style={styles.commentModalContent}>
+                          <View style={styles.commentModalHeader}>
+                            <Text style={styles.commentModalUserName}>{c.userName}</Text>
+                            <Text style={styles.commentModalTime}>{formatCommentTime(c.createdAt)}</Text>
+                          </View>
+                          <Text style={styles.commentModalText}>{c.text}</Text>
+                          <View style={styles.commentModalActions}>
+                            <TouchableOpacity 
+                              style={styles.commentModalLikeBtn} 
+                              onPress={() => handleLikeCommentInModal(c)}
+                            >
+                              <Ionicons 
+                                name={liked ? 'heart' : 'heart-outline'} 
+                                size={14} 
+                                color={liked ? '#EF4444' : '#8E8E93'} 
+                              />
+                              {likes > 0 && (
+                                <Text style={[styles.commentModalLikeCount, liked && { color: '#EF4444' }]}>
+                                  {likes}
+                                </Text>
+                              )}
+                            </TouchableOpacity>
+                            <Text style={styles.commentFullTime}>
+                              {new Date(c.createdAt).toLocaleString('en-US', {
+                                month: 'short',
+                                day: 'numeric',
+                                hour: 'numeric',
+                                minute: '2-digit',
+                                hour12: true
+                              })}
+                            </Text>
+                          </View>
+                        </View>
                       </View>
-                      <TouchableOpacity style={styles.commentLikeBtn} onPress={() => handleLikeCommentInModal(c)}>
-                        <Ionicons name={liked ? 'heart' : 'heart-outline'} size={16} color={liked ? '#EF4444' : '#6B7280'} />
-                        <Text style={[styles.commentLikeText, liked && { color: '#EF4444' }]}>{likes}</Text>
-                      </TouchableOpacity>
+                    );
+                  }}
+                  ListEmptyComponent={() => (
+                    <View style={styles.emptyCommentsContainer}>
+                      <Text style={styles.emptyCommentsText}>No comments yet. Be the first to comment!</Text>
                     </View>
-                  );
-                }}
-                ListEmptyComponent={() => (
-                  <View style={{ paddingVertical: 24, alignItems: 'center' }}>
-                    <Text style={{ color: '#6B7280' }}>No comments yet. Be the first to comment!</Text>
-                  </View>
-                )}
-              />
-            )}
+                  )}
+                />
+              )}
+            </View>
 
-            <View style={styles.commentInputRow}>
-              <TextInput
-                style={styles.commentInput}
-                placeholder="Add a comment..."
-                placeholderTextColor="#9CA3AF"
-                value={commentsModal.text}
-                onChangeText={(t) => setCommentsModal((s) => ({ ...s, text: t }))}
-                multiline
-                maxLength={500}
-              />
-              <TouchableOpacity style={styles.sendBtn} onPress={handleAddCommentInModal}>
-                <Text style={styles.sendBtnText}>Send</Text>
-              </TouchableOpacity>
+            <View style={styles.commentInputContainer}>
+              <View style={styles.commentInputRow}>
+                <View style={styles.inputAvatar}>
+                  <Text style={styles.inputAvatarText}>{getUserInitials(user?.username || user?.email || 'You')}</Text>
+                </View>
+                <TextInput
+                  style={styles.commentInput}
+                  placeholder="Add a comment..."
+                  placeholderTextColor="#9CA3AF"
+                  value={commentsModal.text}
+                  onChangeText={(t) => setCommentsModal((s) => ({ ...s, text: t }))}
+                  multiline
+                  maxLength={500}
+                />
+                <TouchableOpacity 
+                  style={[styles.sendBtn, !commentsModal.text?.trim() && styles.sendBtnDisabled]} 
+                  onPress={handleAddCommentInModal}
+                  disabled={!commentsModal.text?.trim()}
+                >
+                  <Ionicons 
+                    name="send" 
+                    size={16} 
+                    color={commentsModal.text?.trim() ? '#3B82F6' : '#9CA3AF'} 
+                  />
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
         </View>
@@ -1031,9 +1171,8 @@ const styles = StyleSheet.create({
   // Modal styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    justifyContent: 'center',
-    padding: 24,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
   },
   modalCard: {
     backgroundColor: '#FFFFFF',
@@ -1082,108 +1221,267 @@ const styles = StyleSheet.create({
   
   // Comments preview styles
   commentsPreview: {
-    marginTop: 8,
-    paddingTop: 4,
+    marginTop: 12,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
   },
-  commentRow: {
+  commentPreviewRow: {
+    flexDirection: 'row',
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  commentAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#3B82F6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
+  },
+  commentAvatarText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  commentContent: {
+    flex: 1,
+  },
+  commentHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginVertical: 4,
-  },
-  commentBubble: {
-    flexShrink: 1,
-    backgroundColor: '#F3F4F6',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  commentUser: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1F2937',
     marginBottom: 2,
   },
-  commentText: {
+  commentUserName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1F2937',
+    marginRight: 6,
+  },
+  commentTime: {
+    fontSize: 11,
+    color: '#8E8E93',
+  },
+  commentPreviewText: {
     fontSize: 13,
     color: '#374151',
+    lineHeight: 18,
+    marginBottom: 4,
+  },
+  commentActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   commentLikeBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginLeft: 8,
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+    borderRadius: 4,
   },
-  commentLikeText: {
+  commentLikeCount: {
     marginLeft: 4,
-    fontSize: 12,
-    color: '#6B7280',
+    fontSize: 11,
+    color: '#8E8E93',
+    fontWeight: '500',
+  },
+  viewAllCommentsBtn: {
+    paddingVertical: 4,
+    paddingHorizontal: 4,
+    marginTop: 4,
   },
   viewAllCommentsText: {
-    marginTop: 6,
-    color: '#3B82F6',
+    color: '#8E8E93',
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '500',
   },
 
   // Full comments modal styles
+  commentsModalCard: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    marginTop: 'auto',
+    maxHeight: '85%',
+    minHeight: '50%',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: -4,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    elevation: 20,
+  },
   commentsHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 8,
+    padding: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
+    position: 'relative',
   },
-  sortTabs: {
-    flexDirection: 'row',
-    marginBottom: 8,
+  modalHandle: {
+    position: 'absolute',
+    top: 8,
+    left: '50%',
+    marginLeft: -20,
+    width: 40,
+    height: 4,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 2,
   },
-  sortTab: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 16,
-    marginRight: 8,
-    backgroundColor: '#F3F4F6',
-  },
-  sortTabActive: {
-    backgroundColor: '#DBEAFE',
-  },
-  sortTabText: {
-    fontSize: 13,
-    color: '#6B7280',
-    fontWeight: '600',
-  },
-  sortTabTextActive: {
-    color: '#1D4ED8',
+  commentsContainer: {
+    flex: 1,
+    minHeight: 200,
   },
   commentsList: {
-    marginBottom: 8,
+    flex: 1,
+  },
+  commentsListContent: {
+    padding: 16,
+    paddingBottom: 8,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  loadingText: {
+    marginTop: 8,
+    color: '#6B7280',
+    fontSize: 14,
+  },
+  emptyCommentsContainer: {
+    paddingVertical: 40,
+    alignItems: 'center',
+  },
+  emptyCommentsText: {
+    color: '#6B7280',
+    fontSize: 14,
+  },
+  commentModalRow: {
+    flexDirection: 'row',
+    marginBottom: 16,
+    paddingHorizontal: 4,
+  },
+  commentModalAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#3B82F6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  commentModalAvatarText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  commentModalContent: {
+    flex: 1,
+  },
+  commentModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  commentModalUserName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1F2937',
+    marginRight: 8,
+  },
+  commentModalTime: {
+    fontSize: 12,
+    color: '#8E8E93',
+  },
+  commentModalText: {
+    fontSize: 14,
+    color: '#374151',
+    lineHeight: 20,
+    marginBottom: 6,
+  },
+  commentModalActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  commentModalLikeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    borderRadius: 6,
+  },
+  commentModalLikeCount: {
+    marginLeft: 4,
+    fontSize: 12,
+    color: '#8E8E93',
+    fontWeight: '500',
+  },
+  commentFullTime: {
+    fontSize: 11,
+    color: '#C7C7CC',
+  },
+  commentInputContainer: {
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+    paddingTop: 16,
+    paddingBottom: 16,
+    paddingHorizontal: 16,
+    backgroundColor: '#FFFFFF',
   },
   commentInputRow: {
     flexDirection: 'row',
+    alignItems: 'flex-end',
+  },
+  inputAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#3B82F6',
+    justifyContent: 'center',
     alignItems: 'center',
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB',
-    paddingTop: 8,
-    marginTop: 8,
+    marginRight: 8,
+  },
+  inputAvatarText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
   },
   commentInput: {
     flex: 1,
     borderWidth: 1,
     borderColor: '#E5E7EB',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    borderRadius: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     color: '#111827',
+    maxHeight: 100,
+    fontSize: 15,
+    backgroundColor: '#F9FAFB',
   },
   sendBtn: {
-    marginLeft: 8,
+    marginLeft: 12,
+    padding: 10,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
     backgroundColor: '#3B82F6',
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
   },
-  sendBtnText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
+  closeButton: {
+    padding: 4,
+    borderRadius: 20,
+    backgroundColor: '#F3F4F6',
+  },
+  sendBtnDisabled: {
+    opacity: 0.5,
   },
 });
 

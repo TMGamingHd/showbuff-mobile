@@ -307,19 +307,34 @@ export const AuthProvider = ({ children }) => {
       // Clear backend service token
       BackendService.clearToken();
       
-      // Clear stored data
-      await AsyncStorage.multiRemove([
+      // Build list of keys to clear - both old non-user-specific and new per-user keys
+      const keysToRemove = [
         'user',
         'authToken',
-        // Also clear any persisted caches for user data to avoid stale contamination
+        // Old non-user-specific keys (for backward compatibility)
         'watchlist',
         'currentlyWatching',
         'watched',
         'reviews',
+        'activity',
         'userData',
         'lastSync'
-      ]);
-      console.log('[AuthContext] Cleared auth and cached user list data from AsyncStorage');
+      ];
+      
+      // Add per-user keys if we have a user ID
+      if (user?.id) {
+        keysToRemove.push(
+          `${user.id}_watchlist`,
+          `${user.id}_currentlyWatching`,
+          `${user.id}_watched`,
+          `${user.id}_reviews`,
+          `${user.id}_activity`,
+          `${user.id}_lastSync`
+        );
+      }
+      
+      await AsyncStorage.multiRemove(keysToRemove);
+      console.log('[AuthContext] Cleared auth and all cached user data from AsyncStorage:', keysToRemove);
       
       setUser(null);
       setIsAuthenticated(false);

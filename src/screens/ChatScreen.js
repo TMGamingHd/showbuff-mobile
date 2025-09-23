@@ -15,6 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../contexts/AppContext';
 import { useAuth } from '../contexts/AuthContext';
 import TMDBService from '../services/tmdb';
+import BackendService from '../services/backend';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const ChatScreen = ({ route, navigation }) => {
@@ -45,7 +46,22 @@ const ChatScreen = ({ route, navigation }) => {
     try {
       const data = await getConversation(friend.id);
       const rows = Array.isArray(data) ? data : (data?.messages || []);
-      setMessages(rows);
+      
+      // Enrich movie data in messages
+      const enrichedMessages = await Promise.all(
+        rows.map(async (message) => {
+          if (message.messageType === 'movie_share' && message.movieData) {
+            const enrichedMovie = await BackendService.enrichMovieData(message.movieData);
+            return {
+              ...message,
+              movieData: enrichedMovie || message.movieData
+            };
+          }
+          return message;
+        })
+      );
+      
+      setMessages(enrichedMessages);
     } catch (error) {
       console.error('Error loading conversation:', error);
     }

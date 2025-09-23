@@ -4,7 +4,8 @@ const { v4: uuidv4 } = require('uuid');
 // Start with demo account and tony account
 const users = [
   { id: 1, username: 'demo', email: 'demo@showbuff.com', password: 'demo123' },
-  { id: 2, username: 'tony', email: 'tony@gmail.com', password: 'tony123' }
+  { id: 2, username: 'tony', email: 'tony@gmail.com', password: 'tony123' },
+  { id: 3, username: 'alice', email: 'alice@test.com', password: 'alice123' }
 ];
 
 // Token map: token -> userId
@@ -26,11 +27,8 @@ const lists = new Map();
 // Reviews per userId - start empty
 const reviews = new Map();
 
-// Friends - demo and tony are friends
-const friends = new Map([
-  [1, [{ id: 2, username: 'tony' }]], // demo is friends with tony
-  [2, [{ id: 1, username: 'demo' }]]  // tony is friends with demo
-]);
+// Friends - start empty for clean testing
+const friends = new Map();
 const friendRequests = new Map();
 
 // Messages per (userId, friendId) key -> array

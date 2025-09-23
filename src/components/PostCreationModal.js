@@ -26,7 +26,7 @@ const PostCreationModal = ({ visible, onClose, onPostCreated }) => {
   const [userMovies, setUserMovies] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const { user } = useAuth();
-  const { createPost, watchlist, currentlyWatching, watched } = useApp();
+  const { createPost, watchlist, currentlyWatching, watched, refreshData } = useApp();
   const insets = useSafeAreaInsets();
 
   // Reset state when modal opens/closes
@@ -85,6 +85,10 @@ const PostCreationModal = ({ visible, onClose, onPostCreated }) => {
       if (result.success) {
         setContent('');
         onClose();
+        
+        // Refresh activity data to show the new post without duplicates
+        await refreshData();
+        
         if (onPostCreated) {
           onPostCreated(result.post);
         }

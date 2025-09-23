@@ -16,6 +16,7 @@ import {
   Alert,
   RefreshControl
 } from 'react-native';
+import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import { Ionicons } from '@expo/vector-icons';
 import TMDBService from './src/services/tmdb';
 import BackendService from './src/services/backend';
@@ -537,10 +538,47 @@ const MainApp = () => {
     return <AuthScreen />;
   }
 
+  // Helper: wrap a screen with horizontal swipe to change bottom tab
+  const withSwipe = (ScreenComponent, tabOrder, tabName) => (props) => {
+    const swipeThreshold = 50;
+    const onHandlerStateChange = ({ nativeEvent }) => {
+      if (nativeEvent.state === State.END) {
+        // Let Watchlist screen handle its own swipe logic for sub-tabs and edge navigation
+        if (tabName === 'Watchlist') return;
+        const dx = nativeEvent.translationX;
+        const currentIdx = tabOrder.indexOf(tabName);
+        if (dx <= -swipeThreshold && currentIdx < tabOrder.length - 1) {
+          const next = tabOrder[currentIdx + 1];
+          if (next === 'Watchlist') {
+            props.navigation.navigate('Watchlist', { initialSubTab: 'watchlist' });
+          } else {
+            props.navigation.navigate(next);
+          }
+        } else if (dx >= swipeThreshold && currentIdx > 0) {
+          const prev = tabOrder[currentIdx - 1];
+          if (prev === 'Watchlist') {
+            // Coming from Friends -> Watchlist should land on 'watched'
+            props.navigation.navigate('Watchlist', { initialSubTab: 'watched' });
+          } else {
+            props.navigation.navigate(prev);
+          }
+        }
+      }
+    };
+    return (
+      <PanGestureHandler onHandlerStateChange={onHandlerStateChange}>
+        <View style={{ flex: 1 }}>
+          <ScreenComponent {...props} />
+        </View>
+      </PanGestureHandler>
+    );
+  };
+
   // Tab Navigator Component
   const TabNavigator = () => {
     const insets = useSafeAreaInsets();
     const bottom = insets?.bottom || 0;
+    const tabOrder = ['Home', 'Search', 'Watchlist', 'Friends', 'Profile'];
     return (
       <Tab.Navigator
         screenOptions={({ route }) => ({
@@ -574,11 +612,11 @@ const MainApp = () => {
           headerShown: false,
         })}
       >
-        <Tab.Screen name="Home" component={SocialFeedScreen} />
-        <Tab.Screen name="Search" component={SearchScreen} />
-        <Tab.Screen name="Watchlist" component={WatchlistScreen} />
-        <Tab.Screen name="Friends" component={FriendsScreen} />
-        <Tab.Screen name="Profile" component={ProfileScreen} />
+        <Tab.Screen name="Home" component={withSwipe(SocialFeedScreen, tabOrder, 'Home')} />
+        <Tab.Screen name="Search" component={withSwipe(SearchScreen, tabOrder, 'Search')} />
+        <Tab.Screen name="Watchlist" component={withSwipe(WatchlistScreen, tabOrder, 'Watchlist')} />
+        <Tab.Screen name="Friends" component={withSwipe(FriendsScreen, tabOrder, 'Friends')} />
+        <Tab.Screen name="Profile" component={withSwipe(ProfileScreen, tabOrder, 'Profile')} />
       </Tab.Navigator>
     );
   };

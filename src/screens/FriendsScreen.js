@@ -63,17 +63,38 @@ const FriendsScreen = ({ navigation }) => {
     const result = await sendFriendRequest(userId);
     if (result.success) {
       Alert.alert('Success', result.message);
+      refreshData(); // Refresh to show updated friend requests
     } else {
       Alert.alert('Error', result.error);
     }
   };
 
   const handleAcceptRequest = async (requestId) => {
-    const result = await acceptFriendRequest(requestId);
-    if (result.success) {
-      Alert.alert('Success', 'Friend request accepted!');
-    } else {
-      Alert.alert('Error', result.error);
+    console.log('=== FRIENDS SCREEN ACCEPT REQUEST V2 ===');
+    console.log('Request ID:', requestId);
+    console.log('acceptFriendRequest function type:', typeof acceptFriendRequest);
+    console.log('acceptFriendRequest value:', acceptFriendRequest);
+    
+    if (!acceptFriendRequest) {
+      console.error('ERROR: acceptFriendRequest is undefined!');
+      Alert.alert('Error', 'Accept function not available');
+      return;
+    }
+    
+    try {
+      console.log('CALLING acceptFriendRequest now...');
+      const result = await acceptFriendRequest(requestId);
+      console.log('RESULT from acceptFriendRequest:', result);
+      
+      if (result && result.success) {
+        Alert.alert('Success', 'Friend request accepted!');
+      } else {
+        Alert.alert('Error', result?.error || 'Failed to accept friend request');
+      }
+    } catch (error) {
+      console.error('CAUGHT ERROR in handleAcceptRequest:', error);
+      console.error('Error stack:', error.stack);
+      Alert.alert('Error', 'Failed to accept friend request');
     }
   };
 
@@ -81,6 +102,7 @@ const FriendsScreen = ({ navigation }) => {
     const result = await rejectFriendRequest(requestId);
     if (result.success) {
       Alert.alert('Success', 'Friend request rejected');
+      // No need to call refreshData since rejectFriendRequest already updates state
     } else {
       Alert.alert('Error', result.error);
     }

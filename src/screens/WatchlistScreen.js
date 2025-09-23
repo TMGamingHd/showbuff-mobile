@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import {
   TextInput,
   ScrollView
 } from 'react-native';
+import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../contexts/AppContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -24,7 +25,7 @@ import { listLabel } from '../utils/lists';
 const { width } = Dimensions.get('window');
 const ITEM_WIDTH = (width - 60) / 2;
 
-const WatchlistScreen = () => {
+const WatchlistScreen = ({ navigation, route }) => {
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const { 
@@ -41,7 +42,7 @@ const WatchlistScreen = () => {
     stats
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState('watchlist');
+  const [activeTab, setActiveTab] = useState(route?.params?.initialSubTab || 'watchlist');
   const [selectedMovie, setSelectedMovie] = useState(null);
   const [showAddToListModal, setShowAddToListModal] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
@@ -264,8 +265,56 @@ const WatchlistScreen = () => {
     </View>
   );
 
+  const swipeThreshold = 50;
+  const lastDxRef = useRef(0);
+  const subTabOrder = ['watchlist', 'currently_watching', 'watched'];
+  const onSwipeGestureEvent = ({ nativeEvent }) => {
+    lastDxRef.current = nativeEvent.translationX;
+  };
+
+  const onSwipeHandlerStateChange = ({ nativeEvent }) => {
+    if (nativeEvent.state === State.END) {
+      const dx = lastDxRef.current;
+      lastDxRef.current = 0;
+      const currentIdx = subTabOrder.indexOf(activeTab);
+      // Edge navigations first
+      if (dx <= -swipeThreshold && activeTab === 'watched') {
+        // From Watched, swipe left to Friends tab
+        navigation?.navigate?.('Friends');
+        return;
+      }
+      if (dx >= swipeThreshold && activeTab === 'watchlist') {
+        // From Watchlist, swipe right to Search tab
+        navigation?.navigate?.('Search');
+        return;
+      }
+
+      // Internal sub-tab navigation
+      if (dx <= -swipeThreshold && currentIdx < subTabOrder.length - 1) {
+        setActiveTab(subTabOrder[currentIdx + 1]);
+      } else if (dx >= swipeThreshold && currentIdx > 0) {
+        setActiveTab(subTabOrder[currentIdx - 1]);
+      }
+    }
+  };
+
+  // If we are navigated to with a specific initialSubTab (e.g., from Friends), honor it
+  React.useEffect(() => {
+    const desired = route?.params?.initialSubTab;
+    if (desired && subTabOrder.includes(desired) && desired !== activeTab) {
+      setActiveTab(desired);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route?.params?.initialSubTab]);
+
   return (
-    <View style={[styles.container, { paddingBottom: (insets?.bottom || 0) }]}>
+    <PanGestureHandler 
+      onGestureEvent={onSwipeGestureEvent}
+      onHandlerStateChange={onSwipeHandlerStateChange}
+      activeOffsetX={[-20, 20]}
+      failOffsetY={[-10, 10]}
+    >
+      <View style={[styles.container, { paddingBottom: (insets?.bottom || 0) }]}>
       <View style={[styles.header, { paddingTop: (insets?.top || 0) + 12 }]}>
         <Text style={styles.title}>My Lists</Text>
         <Text style={styles.subtitle}>
@@ -382,7 +431,8 @@ const WatchlistScreen = () => {
           )}
         </View>
       </Modal>
-    </View>
+      </View>
+    </PanGestureHandler>
   );
 };
 

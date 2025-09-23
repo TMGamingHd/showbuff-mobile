@@ -166,7 +166,7 @@ app.post('/api/user/add-to-list', requireAuth, (req, res) => {
     id: `activity-${Date.now()}`,
     type: 'list',
     action: normalized === 'watchlist' ? 'added_to_watchlist' : 
-           normalized === 'currently-watching' ? 'added_to_watching' : 'added_to_watched',
+           normalized === 'currently-watching' ? 'added_to_currentlywatching' : 'added_to_watched',
     userId: req.userId,
     userName: user?.username || user?.email || 'User',
     movieId: show.id,
@@ -233,7 +233,7 @@ app.post('/api/user/move-to-list', requireAuth, (req, res) => {
     id: `activity-${Date.now()}`,
     type: 'list',
     action: normalizedTo === 'watchlist' ? 'moved_to_watchlist' : 
-           normalizedTo === 'currently-watching' ? 'moved_to_watching' : 'moved_to_watched',
+           normalizedTo === 'currently-watching' ? 'moved_to_currentlywatching' : 'moved_to_watched',
     userId: req.userId,
     userName: user?.username || user?.email || 'User',
     movieId: show.id,
@@ -351,7 +351,24 @@ app.post('/api/user/reviews', requireAuth, (req, res) => {
     });
     activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
     
-    return res.json({ success: true, review, isEditing });
+    // Update the post in activities to include like count
+    const updatePostInActivities = (activityMap, postId, likeCount) => {
+      for (const [key, activities] of activityMap.entries()) {
+        const postIndex = activities.findIndex(a => a.id === postId);
+        if (postIndex >= 0) {
+          activities[postIndex].reactions = likeCount;
+          activities[postIndex].likeCount = likeCount;
+        }
+      }
+    };
+    
+    updatePostInActivities(activities, review.id, review.reactions.length);
+    
+    return res.json({ 
+      success: true, 
+      review, 
+      isEditing 
+    });
   } catch (error) {
     console.error('Error managing review:', error);
     return res.status(500).json({ message: 'Internal server error', error: error.message });
@@ -470,15 +487,18 @@ app.get('/api/friends/:friendId/profile', requireAuth, (req, res) => {
   console.log(`[${new Date().toISOString()}] GET /api/friends/${friendId}/profile`);
   console.log('Requesting user ID:', req.userId);
   console.log('Friend ID:', friendId);
-  console.log('All users:', users);
-  console.log('All friends data:', Array.from(friends.entries()));
-  console.log('User friends:', userFriends);
   
   // Check if they are actually friends
   const isFriend = userFriends.some(f => Number(f.id) === friendId);
   if (!isFriend) {
     console.log('Not authorized - not friends');
     return res.status(403).json({ error: 'Not authorized to view this profile' });
+  }
+  
+  // Get friend's basic info
+  const friendUser = getUserById(friendId);
+  if (!friendUser) {
+    return res.status(404).json({ error: 'Friend not found' });
   }
   
   // Get friend's data
@@ -488,17 +508,27 @@ app.get('/api/friends/:friendId/profile', requireAuth, (req, res) => {
   const friendWatched = friendLists.watched || [];
   const friendReviews = reviews.get(friendId) || [];
   
+  // Get friend's activity
+  const friendActivity = activity.get(friendId) || [];
+  
   console.log('Friend data:');
   console.log('- Watchlist:', friendWatchlist.length, 'items');
   console.log('- Currently Watching:', friendCurrentlyWatching.length, 'items');
   console.log('- Watched:', friendWatched.length, 'items');
   console.log('- Reviews:', friendReviews.length, 'items');
+  console.log('- Activity:', friendActivity.length, 'items');
   
   const response = {
+    user: {
+      id: friendUser.id,
+      username: friendUser.username,
+      email: friendUser.email
+    },
     watchlist: friendWatchlist,
     currentlyWatching: friendCurrentlyWatching,
     watched: friendWatched,
-    reviews: friendReviews
+    reviews: friendReviews,
+    activity: friendActivity
   };
   
   console.log('Sending response:', JSON.stringify(response, null, 2));
@@ -526,12 +556,6 @@ app.get('/api/users/search', requireAuth, (req, res) => {
   res.json(result);
 });
 
-app.get('/api/friends/:friendId/profile', requireAuth, (req, res) => {
-  const friendId = Number(req.params.friendId);
-  const user = getUserById(friendId);
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  res.json({ ...user });
-});
 
 app.get('/api/friends/:friendId/movies', requireAuth, (req, res) => {
   const friendId = Number(req.params.friendId);
@@ -542,398 +566,502 @@ app.get('/api/friends/:friendId/movies', requireAuth, (req, res) => {
 });
 
 // ===== Activity =====
-// Log all registered routes for debugging
-app._router.stack.forEach((r) => {
-  if (r.route && r.route.path) {
-    console.log(`[Route Registered] ${Object.keys(r.route.methods).join(', ').toUpperCase()} ${r.route.path}`);
-  }
-});
-
-// Create a new post
+// Create a text post (with optional movie) and add to activity feeds
 app.post('/api/activity/create-post', requireAuth, (req, res) => {
-  const { content, type = 'text_post', movie, visibility = 'public' } = req.body || {};
-  const trimmed = (content || '').trim();
-  
-  if (!trimmed && !movie) {
-    return res.status(400).json({ success: false, error: 'Content or movie is required' });
-  }
-
-  // Get user info
-  const user = users.get(req.userId);
-  if (!user) {
-    return res.status(404).json({ success: false, error: 'User not found' });
-  }
-
-  // Process movie data if provided
-  let postMovie;
-  if (movie && typeof movie === 'object') {
-    postMovie = {
-      id: Number(movie.id) || movie.id,
-      title: movie.title || movie.name || 'Unknown Movie',
-      poster_path: movie.poster_path || null,
-      vote_average: typeof movie.vote_average === 'number' ? movie.vote_average : Number(movie.vote_average) || undefined,
-      listType: movie.listType
-    };
-  }
-  
-  const post = {
-    id: `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-    type,
-    userId: req.userId,
-    userName: user.username,
-    userEmail: user.email,
-    content: trimmed,
-    movie: postMovie,
-    visibility,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    likes: [],
-    comments: []
-  };
-  
-  // Add to global feed
-  const global = activities.get('global') || [];
-  activities.set('global', [post, ...global].slice(0, 100));
-  
-  // Add to user's feed
-  const userFeed = ensureUserActivity(req.userId);
-  userFeed.unshift(post);
-  activities.set(req.userId, userFeed.slice(0, 50));
-  
-  console.log(`[Server] Created new ${type} post for user ${req.userId}`);
-  res.status(201).json({ success: true, post });
-});
-
-// Get user activity feed
-app.get('/api/user/:userId/activity', requireAuth, (req, res) => {
-  const uid = Number(req.params.userId);
-  const l = ensureUserLists(uid);
-  const acts = [];
-  for (const [k, arr] of Object.entries(l)) {
-    for (const s of arr) acts.push({ type: 'list_update', list: k, showId: s.id, at: new Date().toISOString() });
-  }
-  res.json(acts);
-});
-
-// Get friend activity feed
-app.get('/api/user/activity', requireAuth, (req, res) => {
-  const me = req.userId;
-  const fs = friends.get(me) || [];
-  const acts = [];
-  for (const f of fs) {
-    const l = ensureUserLists(f.id);
-    for (const [k, arr] of Object.entries(l)) {
-      for (const s of arr) {
-        acts.push({ 
-          userId: f.id, 
-          type: 'list_update', 
-          list: k, 
-          showId: s.id, 
-          at: new Date().toISOString() 
-        });
-      }
+  try {
+    const { content, visibility = 'friends', movie } = req.body || {};
+    const text = String(content || '').trim();
+    if (!text) {
+      return res.status(400).json({ message: 'content is required' });
     }
-  }
-  res.json(acts);
-});
 
-// Utility to update a post across global and owner activity lists
-function updatePostEverywhere(postId, updater) {
-  // Update in global feed first
-  const global = activities.get('global') || [];
-  let idx = global.findIndex(p => p.id === postId);
-  if (idx >= 0) {
-    const updated = updater({ ...global[idx] });
-    global[idx] = updated;
-    activities.set('global', global);
-
-    // Also update in owner's personal activity list
-    const ownerId = updated.userId;
-    const ownerActs = activities.get(ownerId) || [];
-    const idx2 = ownerActs.findIndex(p => p.id === postId);
-    if (idx2 >= 0) {
-      ownerActs[idx2] = updated;
-      activities.set(ownerId, ownerActs);
-    }
-    return updated;
-  }
-
-  // Fallback: search all activity lists
-  for (const [key, arr] of activities.entries()) {
-    if (key === 'global') continue;
-    const i = (arr || []).findIndex(p => p.id === postId);
-    if (i >= 0) {
-      const updated = updater({ ...arr[i] });
-      arr[i] = updated;
-      activities.set(key, arr);
-
-      // Try syncing to global if exists
-      const g2 = activities.get('global') || [];
-      const ig = g2.findIndex(p => p.id === postId);
-      if (ig >= 0) {
-        g2[ig] = updated;
-        activities.set('global', g2);
-      }
-      return updated;
-    }
-  }
-  return null;
-}
-
-// Toggle like on a post
-app.post('/api/posts/:postId/like', requireAuth, (req, res) => {
-  const { postId } = req.params;
-  const updated = updatePostEverywhere(postId, (post) => {
-    if (!Array.isArray(post.reactions)) post.reactions = [];
-    const existsIdx = post.reactions.findIndex(uid => Number(uid) === Number(req.userId));
-    if (existsIdx >= 0) {
-      post.reactions.splice(existsIdx, 1);
-    } else {
-      post.reactions.push(req.userId);
-    }
-    return post;
-  });
-
-  if (!updated) return res.status(404).json({ message: 'Post not found' });
-  const liked = Array.isArray(updated.reactions) && updated.reactions.some(uid => Number(uid) === Number(req.userId));
-  return res.json({ success: true, post: updated, liked, reactions: Array.isArray(updated.reactions) ? updated.reactions.length : 0 });
-});
-
-// Add a comment to a post
-app.post('/api/posts/:postId/comments', requireAuth, (req, res) => {
-  const { postId } = req.params;
-  const { text } = req.body || {};
-  const trimmed = String(text || '').trim();
-  if (!trimmed) return res.status(400).json({ message: 'text required' });
-  const user = getUserById(req.userId);
-
-  const updated = updatePostEverywhere(postId, (post) => {
-    if (!Array.isArray(post.comments)) post.comments = [];
-    const comment = {
-      id: `c_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    const user = getUserById(req.userId);
+    const createdAt = new Date().toISOString();
+    const post = {
+      id: `activity-${Date.now()}`,
+      type: 'post',
+      action: 'created',
       userId: req.userId,
       userName: user?.username || user?.email || 'User',
-      text: trimmed,
-      createdAt: new Date().toISOString(),
-      likes: [],
+      content: text,
+      visibility: visibility || 'friends',
+      movie: movie || null,
+      // Extract movie fields for enrichment system compatibility
+      movieId: movie?.id || movie?.tmdbId,
+      movieTitle: movie?.title || movie?.name,
+      moviePoster: movie?.poster_path,
+      createdAt,
     };
-    post.comments.push(comment);
-    return post;
-  });
 
-  if (!updated) return res.status(404).json({ message: 'Post not found' });
-  return res.json({ success: true, post: updated, comments: Array.isArray(updated.comments) ? updated.comments.length : 0 });
-});
+    // Initialize post with zero reactions and comments
+    post.reactions = [];
+    post.comments = 0;
+    post.likeCount = 0;
+    post.commentCount = 0;
 
-// Get comments for a post
-app.get('/api/posts/:postId/comments', requireAuth, (req, res) => {
-  const { postId } = req.params;
-  const { sort, limit } = req.query || {};
-  const global = activities.get('global') || [];
-  const post = global.find(p => p.id === postId);
-  if (!post) return res.status(404).json({ message: 'Post not found' });
-  let comments = Array.isArray(post.comments) ? [...post.comments] : [];
+    // Add to user's personal activity feed
+    const userActivities = activities.get(req.userId) || [];
+    userActivities.unshift(post);
+    activities.set(req.userId, userActivities.slice(0, 100));
 
-  // Optional sorting: sort=top sorts by likes count desc, then createdAt desc
-  if (String(sort).toLowerCase() === 'top') {
-    comments.sort((a, b) => {
-      const la = Array.isArray(a.likes) ? a.likes.length : 0;
-      const lb = Array.isArray(b.likes) ? b.likes.length : 0;
-      if (lb !== la) return lb - la;
-      return new Date(b.createdAt) - new Date(a.createdAt);
-    });
-  }
-
-  // Optional limit
-  const lim = Number(limit);
-  if (!Number.isNaN(lim) && lim > 0) {
-    comments = comments.slice(0, lim);
-  }
-
-  return res.json({ success: true, comments });
-});
-
-// Toggle like on a comment
-app.post('/api/posts/:postId/comments/:commentId/like', requireAuth, (req, res) => {
-  const { postId, commentId } = req.params;
-  let updatedComment = null;
-  const updated = updatePostEverywhere(postId, (post) => {
-    if (!Array.isArray(post.comments)) post.comments = [];
-    const idx = post.comments.findIndex(c => c.id === commentId);
-    if (idx < 0) return post;
-    const c = { ...(post.comments[idx] || {}) };
-    if (!Array.isArray(c.likes)) c.likes = [];
-    const likeIdx = c.likes.findIndex(uid => Number(uid) === Number(req.userId));
-    if (likeIdx >= 0) c.likes.splice(likeIdx, 1); else c.likes.push(req.userId);
-    post.comments[idx] = c;
-    updatedComment = c;
-    return post;
-  });
-
-  if (!updated) return res.status(404).json({ message: 'Post not found' });
-  if (!updatedComment) return res.status(404).json({ message: 'Comment not found' });
-  const liked = Array.isArray(updatedComment.likes) && updatedComment.likes.some(uid => Number(uid) === Number(req.userId));
-  return res.json({ success: true, post: updated, comment: updatedComment, liked, likes: Array.isArray(updatedComment.likes) ? updatedComment.likes.length : 0 });
-});
-
-// ===== Messages =====
-app.get('/api/messages/conversations', requireAuth, (req, res) => {
-  const me = req.userId;
-  const fs = friends.get(me) || [];
-  // Minimal conversation list
-  const convos = fs.map(f => ({ friendId: f.id, friendUsername: f.username }));
-  res.json(convos);
-});
-
-app.get('/api/messages/conversation/:friendId', requireAuth, (req, res) => {
-  const me = req.userId;
-  const friendId = Number(req.params.friendId);
-  const arr = getConvoArray(me, friendId);
-  // Respond in snake_case as mobile normalizes
-  res.json({ messages: arr });
-});
-
-app.post('/api/messages/send', requireAuth, (req, res) => {
-  const me = req.userId;
-  const { receiverId, friendId, messageText, content } = req.body || {};
-  const to = Number(receiverId || friendId);
-  if (!to) return res.status(400).json({ message: 'receiverId/friendId required' });
-  const text = String(messageText || content || '').trim();
-  const arr = getConvoArray(me, to);
-  const row = { id: `${Date.now()}`, sender_id: me, receiver_id: to, message_text: text, message_type: 'text', created_at: new Date().toISOString() };
-  arr.push(row);
-  res.json({ success: true, message: row });
-});
-
-app.post('/api/messages/send-movie', requireAuth, (req, res) => {
-  const me = req.userId;
-  const { receiverId, friendId, movieId, tmdbId, movie, messageText, content } = req.body || {};
-  const to = Number(receiverId || friendId);
-  if (!to) return res.status(400).json({ message: 'receiverId/friendId required' });
-  const show = upsertShow(movie || { id: tmdbId || movieId });
-  const text = String(messageText || content || `Recommended: ${show.title || show.name || 'a movie'}`);
-  const arr = getConvoArray(me, to);
-  const row = {
-    id: `${Date.now()}`,
-    sender_id: me,
-    receiver_id: to,
-    message_text: text,
-    message_type: 'movie_recommendation',
-    created_at: new Date().toISOString(),
-    tmdb_id: show.id,
-    movie_id: show.id,
-    movie_title: show.title || show.name,
-    show_poster_path: show.poster_path || null,
-  };
-  arr.push(row);
-  res.json({ success: true, message: row });
-});
-
-app.put('/api/messages/mark-read/:friendId', requireAuth, (req, res) => {
-  // Mark messages as read for this conversation
-  const me = req.userId;
-  const friendId = Number(req.params.friendId);
-  const arr = getConvoArray(me, friendId);
-  
-  // Mark all messages from friend to me as read
-  arr.forEach(msg => {
-    if (msg.receiver_id === me && msg.sender_id === friendId) {
-      msg.read_at = new Date().toISOString();
+    // Add to global activity if visible beyond self
+    if (post.visibility === 'public' || post.visibility === 'friends') {
+      const global = activities.get('global') || [];
+      global.unshift(post);
+      activities.set('global', global.slice(0, 50));
     }
-  });
-  
-  res.json({ success: true });
+
+    return res.json({ success: true, post });
+  } catch (error) {
+    console.error('Error creating post:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
 });
 
-// Get total unread message count for the authenticated user
-app.get('/api/messages/total-unread', requireAuth, (req, res) => {
-  const me = req.userId;
-  const myFriends = friends.get(me) || [];
-  let totalUnread = 0;
-  
-  // Count unread messages from all friends
-  myFriends.forEach(friend => {
-    const arr = getConvoArray(me, friend.id);
-    const unreadFromFriend = arr.filter(msg => 
-      msg.receiver_id === me && 
-      msg.sender_id === friend.id && 
-      !msg.read_at
-    ).length;
-    totalUnread += unreadFromFriend;
-  });
-  
-  res.json({ total: totalUnread, count: totalUnread });
+// ===== Missing Activity Endpoints =====
+// Get user's activity feed
+app.get('/api/user/activity', requireAuth, (req, res) => {
+  try {
+    const userActivities = activities.get(req.userId) || [];
+    return res.json(userActivities);
+  } catch (error) {
+    console.error('Error fetching user activity:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
 });
 
-// Get unread message counts per friend for the authenticated user
-app.get('/api/messages/unread-counts', requireAuth, (req, res) => {
-  const me = req.userId;
-  const myFriends = friends.get(me) || [];
-  const counts = {};
-  
-  // Count unread messages from each friend
-  myFriends.forEach(friend => {
-    const arr = getConvoArray(me, friend.id);
-    const unreadFromFriend = arr.filter(msg => 
-      msg.receiver_id === me && 
-      msg.sender_id === friend.id && 
-      !msg.read_at
-    ).length;
-    counts[friend.id] = unreadFromFriend;
-  });
-  
-  res.json(counts);
+// Get user's specific activity by ID
+app.get('/api/user/:userId/activity', requireAuth, (req, res) => {
+  try {
+    const userId = Number(req.params.userId);
+    const userActivities = activities.get(userId) || [];
+    return res.json(userActivities);
+  } catch (error) {
+    console.error('Error fetching user activity:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
 });
 
-// ===== Shows =====
-app.get('/api/shows/:showId', requireAuth, (req, res) => {
-  const id = Number(req.params.showId);
-  const show = shows.get(id) || upsertShow({ id });
-  res.json(show);
-});
-
-app.post('/api/shows', requireAuth, (req, res) => {
-  const show = upsertShow(req.body || {});
-  res.json(show);
-});
-
-// ===== Users search (duplicate path handled above) =====
-// app.get('/api/users/search', ...) already defined
-
-// ===== Social Feed =====
+// Get social feed (global activity)
 app.get('/api/feed/social', requireAuth, (req, res) => {
-  const globalActivity = activities.get('global') || [];
-  const userFriends = friends.get(req.userId) || [];
-  const friendIds = userFriends.map(f => f.id || f.userId);
-  
-  // Filter activity to show:
-  // 1. Public reviews from anyone
-  // 2. Friends-only reviews from actual friends
-  // 3. User's own activity
-  const socialFeed = globalActivity.filter(activity => {
-    if (activity.visibility === 'public') return true;
-    if (activity.userId === req.userId) return true;
-    if (activity.visibility === 'friends' && friendIds.includes(activity.userId)) return true;
-    return false;
-  });
-  
-  res.json(socialFeed.slice(0, 20)); // Return latest 20 items
+  try {
+    const globalActivity = activities.get('global') || [];
+    return res.json(globalActivity);
+  } catch (error) {
+    console.error('Error fetching social feed:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// ===== Missing Messaging Endpoints =====
+// Get conversations
+app.get('/api/messages/conversations', requireAuth, (req, res) => {
+  try {
+    const userFriends = friends.get(req.userId) || [];
+    const conversations = userFriends.map(friend => ({
+      friendId: friend.id,
+      friendName: friend.username,
+      lastMessage: null,
+      unreadCount: 0
+    }));
+    return res.json(conversations);
+  } catch (error) {
+    console.error('Error fetching conversations:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Get messages with a friend
+app.get('/api/messages/conversation/:friendId', requireAuth, (req, res) => {
+  try {
+    const friendId = Number(req.params.friendId);
+    const conversationKey = [req.userId, friendId].sort().join('->');
+    const conversation = messages.get(conversationKey) || [];
+    console.log(`[DEBUG] Fetching conversation for users ${req.userId} and ${friendId}`);
+    console.log(`[DEBUG] Conversation key: ${conversationKey}`);
+    console.log(`[DEBUG] Found ${conversation.length} messages`);
+    console.log(`[DEBUG] All conversation keys:`, Array.from(messages.keys()));
+    return res.json({ messages: conversation });
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Send a message
+app.post('/api/messages/send', requireAuth, (req, res) => {
+  try {
+    const { receiverId, friendId, messageText, content } = req.body || {};
+    const targetId = receiverId || friendId;
+    const text = messageText || content;
+    
+    if (!targetId || !text) {
+      return res.status(400).json({ message: 'receiverId and messageText required' });
+    }
+    
+    const conversationKey = [req.userId, Number(targetId)].sort().join('->');
+    const conversation = messages.get(conversationKey) || [];
+    
+    const message = {
+      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      sender_id: req.userId,
+      receiver_id: Number(targetId),
+      message_text: text,
+      message_type: 'text',
+      read_by_receiver: false, // Track read status
+      created_at: new Date().toISOString()
+    };
+    
+    conversation.push(message);
+    messages.set(conversationKey, conversation);
+    
+    console.log(`[DEBUG] Storing message for users ${req.userId} and ${targetId}`);
+    console.log(`[DEBUG] Conversation key: ${conversationKey}`);
+    console.log(`[DEBUG] Total messages in conversation: ${conversation.length}`);
+    console.log(`[DEBUG] All conversation keys after store:`, Array.from(messages.keys()));
+    
+    return res.json({ success: true, message });
+  } catch (error) {
+    console.error('Error sending message:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Send movie recommendation
+app.post('/api/messages/send-movie', requireAuth, (req, res) => {
+  try {
+    const { receiverId, friendId, movieId, tmdbId, messageText, content, movie } = req.body || {};
+    const targetId = receiverId || friendId;
+    const text = messageText || content || 'Shared a movie with you';
+    const movieData = movie;
+    
+    if (!targetId) {
+      return res.status(400).json({ message: 'receiverId required' });
+    }
+    
+    const conversationKey = [req.userId, Number(targetId)].sort().join('->');
+    const conversation = messages.get(conversationKey) || [];
+    
+    const message = {
+      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      sender_id: req.userId,
+      receiver_id: Number(targetId),
+      message_text: text,
+      message_type: 'movie_recommendation',
+      tmdb_id: tmdbId || movieId,
+      movie_data: movieData,
+      // Add enrichment-compatible fields
+      movieId: movieData?.id || movieData?.tmdbId || tmdbId || movieId,
+      movieTitle: movieData?.title || movieData?.name,
+      moviePoster: movieData?.poster_path,
+      read_by_receiver: false, // Track read status
+      created_at: new Date().toISOString()
+    };
+    
+    conversation.push(message);
+    messages.set(conversationKey, conversation);
+    
+    return res.json({ success: true, message });
+  } catch (error) {
+    console.error('Error sending movie:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Mark messages as read
+app.put('/api/messages/mark-read/:friendId', requireAuth, (req, res) => {
+  try {
+    const userId = req.userId;
+    const friendId = Number(req.params.friendId);
+    
+    const conversationKey = [userId, friendId].sort().join('->');
+    const conversation = messages.get(conversationKey) || [];
+    
+    // Mark all messages from the friend as read
+    conversation.forEach(message => {
+      if (message.sender_id === friendId && message.receiver_id === userId) {
+        message.read_by_receiver = true;
+      }
+    });
+    
+    messages.set(conversationKey, conversation);
+    
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking messages as read:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Get unread message counts
+app.get('/api/messages/unread-counts', requireAuth, (req, res) => {
+  try {
+    const userId = req.userId;
+    const unreadCounts = {};
+    
+    // Check all conversations for unread messages
+    for (const [conversationKey, messageList] of messages.entries()) {
+      const [user1, user2] = conversationKey.split('->').map(Number);
+      
+      // Only check conversations involving the current user
+      if (user1 === userId || user2 === userId) {
+        const otherUserId = user1 === userId ? user2 : user1;
+        
+        // Count unread messages (messages sent by other user that haven't been read)
+        const unreadCount = messageList.filter(msg => 
+          msg.sender_id === otherUserId && !msg.read_by_receiver
+        ).length;
+        
+        if (unreadCount > 0) {
+          unreadCounts[otherUserId] = unreadCount;
+        }
+      }
+    }
+    
+    return res.json(unreadCounts);
+  } catch (error) {
+    console.error('Error fetching unread counts:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Get total unread count
+app.get('/api/messages/total-unread', requireAuth, (req, res) => {
+  try {
+    const userId = req.userId;
+    let totalUnread = 0;
+    
+    // Count all unread messages across all conversations
+    for (const [conversationKey, messageList] of messages.entries()) {
+      const [user1, user2] = conversationKey.split('->').map(Number);
+      
+      // Only check conversations involving the current user
+      if (user1 === userId || user2 === userId) {
+        const otherUserId = user1 === userId ? user2 : user1;
+        
+        // Count unread messages from other user
+        const unreadCount = messageList.filter(msg => 
+          msg.sender_id === otherUserId && !msg.read_by_receiver
+        ).length;
+        
+        totalUnread += unreadCount;
+      }
+    }
+    
+    // Add pending friend requests to total
+    const pendingRequests = friendRequests.get(userId) || [];
+    totalUnread += pendingRequests.length;
+    
+    return res.json({ total: totalUnread });
+  } catch (error) {
+    console.error('Error fetching total unread:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// ===== Post Interaction Endpoints =====
+// In-memory storage for post interactions
+const postLikes = new Map(); // postId -> Set of userIds who liked it
+const postComments = new Map(); // postId -> Array of comments
+const commentLikes = new Map(); // commentId -> Set of userIds who liked it
+
+// Like/Unlike a post
+app.post('/api/posts/:postId/like', requireAuth, (req, res) => {
+  try {
+    const postId = req.params.postId;
+    const userId = req.userId;
+    
+    if (!postLikes.has(postId)) {
+      postLikes.set(postId, new Set());
+    }
+    
+    const likes = postLikes.get(postId);
+    const isLiked = likes.has(userId);
+    
+    if (isLiked) {
+      likes.delete(userId);
+    } else {
+      likes.add(userId);
+    }
+    
+    // Update the post in activities to include like count and reactions array
+    const updatePostInActivities = (activityMap, postId, likeCount, likesArray) => {
+      for (const [key, activities] of activityMap.entries()) {
+        const postIndex = activities.findIndex(a => a.id === postId);
+        if (postIndex >= 0) {
+          activities[postIndex].reactions = likesArray;
+          activities[postIndex].likeCount = likeCount;
+        }
+      }
+    };
+    
+    const likesArray = Array.from(likes);
+    updatePostInActivities(activities, postId, likes.size, likesArray);
+    
+    return res.json({ 
+      success: true, 
+      liked: !isLiked,
+      likeCount: likes.size,
+      reactions: likesArray
+    });
+  } catch (error) {
+    console.error('Error toggling like:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Get post comments
+app.get('/api/posts/:postId/comments', requireAuth, (req, res) => {
+  try {
+    const postId = req.params.postId;
+    const comments = postComments.get(postId) || [];
+    const sort = req.query.sort || 'newest';
+    
+    // Enrich comments with current like status for requesting user
+    const enrichedComments = comments.map(comment => {
+      const likes = commentLikes.get(comment.id) || new Set();
+      return {
+        ...comment,
+        likeCount: likes.size,
+        liked: likes.has(req.userId)
+      };
+    });
+    
+    let sortedComments = [...enrichedComments];
+    if (sort === 'top') {
+      // Sort by like count (descending), then by creation date (newest first)
+      sortedComments.sort((a, b) => {
+        const aLikes = (a.likeCount || 0);
+        const bLikes = (b.likeCount || 0);
+        if (aLikes !== bLikes) return bLikes - aLikes;
+        return new Date(b.createdAt) - new Date(a.createdAt);
+      });
+    } else {
+      // Sort by creation date (newest first)
+      sortedComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    }
+    
+    return res.json(sortedComments);
+  } catch (error) {
+    console.error('Error fetching comments:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Add comment to post
+app.post('/api/posts/:postId/comments', requireAuth, (req, res) => {
+  try {
+    const postId = req.params.postId;
+    const { text } = req.body || {};
+    
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: 'Comment text is required' });
+    }
+    
+    const user = getUserById(req.userId);
+    const comment = {
+      id: `comment-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      postId,
+      userId: req.userId,
+      userName: user?.username || user?.email || 'User',
+      text: text.trim(),
+      createdAt: new Date().toISOString(),
+      likeCount: 0,
+      liked: false
+    };
+    
+    if (!postComments.has(postId)) {
+      postComments.set(postId, []);
+    }
+    
+    const comments = postComments.get(postId);
+    comments.push(comment);
+    
+    // Update the post in activities to include comment count
+    const updatePostInActivities = (activityMap, postId, commentCount) => {
+      for (const [key, activities] of activityMap.entries()) {
+        const postIndex = activities.findIndex(a => a.id === postId);
+        if (postIndex >= 0) {
+          activities[postIndex].comments = commentCount;
+          activities[postIndex].commentCount = commentCount;
+        }
+      }
+    };
+    
+    updatePostInActivities(activities, postId, comments.length);
+    
+    return res.json({ 
+      success: true, 
+      comment,
+      commentCount: comments.length
+    });
+  } catch (error) {
+    console.error('Error adding comment:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Like/Unlike a comment
+app.post('/api/posts/:postId/comments/:commentId/like', requireAuth, (req, res) => {
+  try {
+    const { postId, commentId } = req.params;
+    const userId = req.userId;
+    
+    // Initialize comment likes storage if needed
+    if (!commentLikes.has(commentId)) {
+      commentLikes.set(commentId, new Set());
+    }
+    
+    const likes = commentLikes.get(commentId);
+    const isLiked = likes.has(userId);
+    
+    if (isLiked) {
+      likes.delete(userId);
+    } else {
+      likes.add(userId);
+    }
+    
+    // Update the comment in postComments to include like count
+    const comments = postComments.get(postId) || [];
+    const commentIndex = comments.findIndex(c => c.id === commentId);
+    if (commentIndex >= 0) {
+      comments[commentIndex].likeCount = likes.size;
+      comments[commentIndex].liked = !isLiked;
+    }
+    
+    return res.json({ 
+      success: true, 
+      liked: !isLiked,
+      likeCount: likes.size
+    });
+  } catch (error) {
+    console.error('Error toggling comment like:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Get post like status and count
+app.get('/api/posts/:postId/likes', requireAuth, (req, res) => {
+  try {
+    const postId = req.params.postId;
+    const likes = postLikes.get(postId) || new Set();
+    const isLiked = likes.has(req.userId);
+    
+    return res.json({
+      liked: isLiked,
+      likeCount: likes.size,
+      likedBy: Array.from(likes)
+    });
+  } catch (error) {
+    console.error('Error fetching likes:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
 });
 
 // Function to start the server
 const startServer = () => {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`ShowBuff mock backend listening on http://0.0.0.0:${PORT}`);
-    
-    // Log all registered routes after server starts
-    console.log('\n=== Registered Routes ===');
-    app._router.stack
-      .filter(r => r.route)
-      .map(r => {
-        const method = Object.keys(r.route.methods)[0].toUpperCase();
-        console.log(`${method} ${r.route.path}`);
-      });
-    console.log('=======================\n');
   });
 
   return server;

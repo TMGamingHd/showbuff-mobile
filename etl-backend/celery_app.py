@@ -16,6 +16,10 @@ def _make_celery_app() -> Celery:
     celery.conf.broker_url = cfg.CELERY_BROKER_URL
     celery.conf.result_backend = cfg.CELERY_RESULT_BACKEND
 
+    # Ensure our task modules are imported so names like
+    # "tasks.process_import_file" are registered.
+    celery.autodiscover_tasks(["app.tasks"])
+
     flask_app = create_app(cfg.__class__)
 
     class ContextTask(celery.Task):

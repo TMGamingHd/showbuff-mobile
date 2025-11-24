@@ -22,6 +22,11 @@ def create_app(config_class: type[Config] | None = None) -> Flask:
         message_queue=app.config.get("REDIS_URL"),
     )
 
+    # Ensure database schema exists (idempotent); this avoids needing a
+    # manual shell step on Railway to create tables.
+    with app.app_context():
+        db.create_all()
+
     # Register blueprints
     app.register_blueprint(importer_bp, url_prefix="/api/import")
 

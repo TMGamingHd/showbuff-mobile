@@ -82,3 +82,33 @@ def extract_titles_from_file(path: str) -> list[ExtractedTitleRecord]:
         records.append(ExtractedTitleRecord(raw_text=line, normalized_title=title, year=year))
 
     return records
+
+
+def extract_titles_from_text(text: str) -> list[ExtractedTitleRecord]:
+    """Extract titles from an in-memory text blob.
+
+    This mirrors extract_titles_from_file but operates on a string, which is
+    ideal when Celery workers run in a separate container and cannot access
+    the web server's filesystem.
+    """
+    records: list[ExtractedTitleRecord] = []
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        match = _TITLE_YEAR_RE.match(line)
+        if not match:
+            continue
+
+        title = _normalize_title(match.group("title"))
+        year_str = match.group("year")
+        year = int(year_str) if year_str else None
+
+        if not title:
+            continue
+
+        records.append(ExtractedTitleRecord(raw_text=line, normalized_title=title, year=year))
+
+    return records

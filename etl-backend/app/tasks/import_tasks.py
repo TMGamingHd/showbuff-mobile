@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import os
 from uuid import UUID
 
 from celery import shared_task
 
 from app.extensions import db, socketio
 from app.models import ImportSession, ExtractedTitle
-from app.importer.parsing import extract_titles_from_file
+from app.importer.parsing import extract_titles_from_text
 from app.importer.search import find_matches_for_extracted_title
 
 
 @shared_task(name="tasks.process_import_file")
-def process_import_file(import_id: str, path: str, list_type: str | None, user_id: str | None) -> None:
+def process_import_file(import_id: str, file_text: str, list_type: str | None, user_id: str | None) -> None:
     """Background job: parse the uploaded file and populate matches.
 
     This version only uses local DB search; TMDB API fallback and list updates
@@ -25,7 +24,7 @@ def process_import_file(import_id: str, path: str, list_type: str | None, user_i
     session.status = "processing"
     db.session.commit()
 
-    records = extract_titles_from_file(path)
+    records = extract_titles_from_text(file_text or "")
 
     total = len(records)
     matched = 0
@@ -68,10 +67,3 @@ def process_import_file(import_id: str, path: str, list_type: str | None, user_i
     session.unmatched_count = total - matched
     session.status = "completed"
     db.session.commit()
-
-    # Clean up temporary file if still present
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except OSError:
-        pass

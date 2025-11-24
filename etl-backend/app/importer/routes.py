@@ -8,8 +8,6 @@ from flask import request, jsonify
 from . import importer_bp
 from ..extensions import db
 from ..models import ImportSession, ExtractedTitle, TitleMatch
-from .parsing import extract_titles_from_file
-from .search import find_matches_for_extracted_title
 
 
 @importer_bp.post("/file")
@@ -36,11 +34,14 @@ def upload_file():
     db.session.add(session)
     db.session.commit()
 
-    # Store file to a temporary path inside the container
-    tmp_dir = os.path.join(os.getcwd(), "tmp_imports")
-    os.makedirs(tmp_dir, exist_ok=True)
-    tmp_path = os.path.join(tmp_dir, f"{session.id}_{file.filename}")
-    file.save(tmp_path)
+    # Read file contents into memory; the Celery worker runs in a separate
+    # container and cannot see this web container's filesystem, so we send
+    # the text instead of a path.
+    file_bytes = file.read() or b""
+    try:
+        file_text = file_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        file_text = ""
 
     list_type = request.form.get("listType")
 
@@ -50,7 +51,7 @@ def upload_file():
 
     celery.send_task(
         "tasks.process_import_file",
-        args=[str(session.id), tmp_path, list_type, user_id],
+        args=[str(session.id), file_text, list_type, user_id],
     )
 
     return jsonify({"importId": str(session.id), "status": session.status})

@@ -10,7 +10,6 @@ from ..extensions import db
 from ..models import ImportSession, ExtractedTitle, TitleMatch
 from .parsing import extract_titles_from_file
 from .search import find_matches_for_extracted_title
-from celery_app import celery
 
 
 @importer_bp.post("/file")
@@ -45,7 +44,10 @@ def upload_file():
 
     list_type = request.form.get("listType")
 
-    # Enqueue Celery task
+    # Enqueue Celery task (import Celery lazily to avoid circular imports
+    # during Flask app initialization)
+    from celery_app import celery
+
     celery.send_task(
         "tasks.process_import_file",
         args=[str(session.id), tmp_path, list_type, user_id],

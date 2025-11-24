@@ -1,5 +1,6 @@
 // In-memory data store for ShowBuff mock backend
 const { v4: uuidv4 } = require('uuid');
+const jwt = require('jsonwebtoken');
 
 // Start with demo account and tony account
 const users = [
@@ -8,7 +9,7 @@ const users = [
   { id: 3, username: 'alice', email: 'alice@test.com', password: 'alice123' }
 ];
 
-// Token map: token -> userId
+// Token map: token -> userId (kept for backward compatibility/logging)
 const tokens = new Map();
 
 // Activities map: userId -> array of activities
@@ -59,18 +60,37 @@ function createUser({ username, email, password }) {
 }
 
 function issueTokenForUser(userId) {
-  // Simple token; in real life use JWT
-  const token = `token-${userId}-${uuidv4()}`;
+  // Production-ready JWT token instead of opaque string
+  const secret = process.env.JWT_SECRET || 'dev-jwt-secret-change-me';
+  const expiresIn = process.env.JWT_EXPIRES_IN || '7d';
+
+  const payload = { userId };
+  const token = jwt.sign(payload, secret, { expiresIn });
+
+  // Optional: also track in local map for debugging/compatibility
   tokens.set(token, userId);
+
   return token;
 }
 
 function validateToken(token) {
-  return tokens.has(token);
+  const secret = process.env.JWT_SECRET || 'dev-jwt-secret-change-me';
+  try {
+    jwt.verify(token, secret);
+    return true;
+  } catch (err) {
+    return false;
+  }
 }
 
 function getUserIdFromToken(token) {
-  return tokens.get(token) || null;
+  const secret = process.env.JWT_SECRET || 'dev-jwt-secret-change-me';
+  try {
+    const decoded = jwt.verify(token, secret);
+    return decoded && decoded.userId ? decoded.userId : null;
+  } catch (err) {
+    return null;
+  }
 }
 
 function getUserById(id) {

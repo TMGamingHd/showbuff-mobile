@@ -5,5 +5,7 @@ from flask_socketio import SocketIO
 
 db = SQLAlchemy()
 migrate = Migrate()
-# Use Redis message queue when running behind multiple workers
-socketio = SocketIO(async_mode="eventlet", cors_allowed_origins="*")
+# Socket.IO instance (async mode will be auto-selected by the library).
+# We configure the Redis message_queue in app.__init__.py so multiple
+# Railway instances can share events.
+socketio = SocketIO(cors_allowed_origins="*")

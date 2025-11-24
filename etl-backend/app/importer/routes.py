@@ -105,6 +105,87 @@ def get_import_matches(import_id: str):
     )
 
 
+@importer_bp.post("/confirm")
+def confirm_matches():
+    """Record which matches the user chose and desired list types.
+
+    Body:
+    {
+      "importId": "...",
+      "choices": [
+        { "extractedTitleId": 3, "matchId": 10, "listType": "watchlist" },
+        ...
+      ]
+    }
+
+    For now this endpoint only validates that the referenced ImportSession,
+    ExtractedTitle, and TitleMatch rows exist and belong together. It stores
+    aggregate stats on the ImportSession but does not yet call the
+    main ShowBuff backend to mutate user lists; the mobile app should still
+    call the existing list endpoints for that.
+    """
+    payload = request.get_json(silent=True) or {}
+    import_id = payload.get("importId")
+    choices = payload.get("choices") or []
+
+    if not import_id:
+        return jsonify({"error": "importId is required"}), 400
+
+    try:
+        session_id = UUID(import_id)
+    except ValueError:
+        return jsonify({"error": "invalid import id"}), 400
+
+    session = ImportSession.query.get(session_id)
+    if not session:
+        return jsonify({"error": "import not found"}), 404
+
+    validated: list[dict] = []
+    invalid: list[dict] = []
+
+    for choice in choices:
+        extracted_id = choice.get("extractedTitleId")
+        match_id = choice.get("matchId")
+        list_type = (choice.get("listType") or "").strip()
+
+        if not extracted_id or not match_id or not list_type:
+            invalid.append({"choice": choice, "reason": "missing fields"})
+            continue
+
+        extracted = ExtractedTitle.query.get(extracted_id)
+        match = TitleMatch.query.get(match_id)
+
+        if not extracted or not match or extracted.import_id != session.id or match.extracted_title_id != extracted.id:
+            invalid.append({"choice": choice, "reason": "mismatched ids"})
+            continue
+
+        # Normalize list type to expected form (watchlist/currently_watching/watched)
+        lt = list_type.lower().replace("-", "_")
+        if lt not in {"watchlist", "currently_watching", "watched"}:
+            invalid.append({"choice": choice, "reason": "invalid listType"})
+            continue
+
+        validated.append(
+            {
+                "extractedTitleId": extracted.id,
+                "matchId": match.id,
+                "listType": lt,
+                "mediaType": match.media_type,
+                "tmdbId": match.tmdb_id,
+                "localId": match.local_id,
+            }
+        )
+
+    # For now we just echo back the validated choices; in a future iteration
+    # we could persist them on a dedicated table or fan out to the main
+    # ShowBuff backend for list mutations.
+    return jsonify({
+        "importId": str(session.id),
+        "validated": validated,
+        "invalid": invalid,
+    })
+
+
 @importer_bp.get("/matches/pending")
 def get_pending_imports():
     """Return all non-completed import sessions for a (optional) user."""

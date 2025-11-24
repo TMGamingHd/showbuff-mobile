@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const { initDb } = require('./db');
 const {
   users,
   tokens,
@@ -51,7 +52,7 @@ app.use((req, _res, next) => {
 
 // Health + root
 app.get('/', (_req, res) => {
-  res.json({ ok: true, service: 'ShowBuff mock backend', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'ShowBuff backend', time: new Date().toISOString() });
 });
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
@@ -1061,7 +1062,7 @@ app.get('/api/posts/:postId/likes', requireAuth, (req, res) => {
 // Function to start the server
 const startServer = () => {
   const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ShowBuff mock backend listening on http://0.0.0.0:${PORT}`);
+    console.log(`ShowBuff backend listening on http://0.0.0.0:${PORT}`);
   });
 
   return server;
@@ -1069,7 +1070,14 @@ const startServer = () => {
 
 // Only start the server if this file is run directly (not required)
 if (require.main === module) {
-  startServer();
+  (async () => {
+    try {
+      await initDb();
+    } catch (err) {
+      console.error('[Server] Failed to initialize database schema:', err);
+    }
+    startServer();
+  })();
 }
 
 module.exports = { app, startServer };

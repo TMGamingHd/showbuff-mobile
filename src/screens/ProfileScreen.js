@@ -10,6 +10,7 @@ import {
   FlatList,
   SectionList,
   Modal,
+  Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
@@ -102,12 +103,7 @@ const ProfileScreen = ({ navigation }) => {
     }
   };
 
-  const handleImportPress = async () => {
-    if (!user?.id) {
-      showToast('You must be logged in to import');
-      return;
-    }
-
+  const beginImportFromFile = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: '*/*',
@@ -146,6 +142,35 @@ const ProfileScreen = ({ navigation }) => {
       const message = error?.message || 'Failed to start import';
       showToast(message);
     }
+  };
+
+  const handleImportPress = () => {
+    if (!user?.id) {
+      showToast('You must be logged in to import');
+      return;
+    }
+
+    Alert.alert(
+      'Import your movie & show list',
+      [
+        'You are about to upload a file from your device that contains movies and TV shows you\'ve watched or want to watch.',
+        '',
+        'How it works:',
+        '- We scan your file for titles.',
+        '- You confirm matches using TMDB search.',
+        '- Then you choose which ShowBuff list (Watchlist, Currently Watching, Watched) each title goes to.',
+      ].join('\n'),
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Continue',
+          style: 'default',
+          onPress: () => {
+            beginImportFromFile();
+          },
+        },
+      ]
+    );
   };
 
   const getActivityIcon = (activityType, action) => {

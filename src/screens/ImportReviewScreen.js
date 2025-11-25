@@ -8,12 +8,14 @@ import {
   TouchableOpacity,
   TextInput,
   ScrollView,
+  Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApp } from '../contexts/AppContext';
 import { useAuth } from '../contexts/AuthContext';
 import ImporterService from '../services/importer';
+import TMDBService from '../services/tmdb';
 import { showToast } from '../utils/toast';
 
 const LIST_OPTIONS = [
@@ -24,6 +26,53 @@ const LIST_OPTIONS = [
 
 const ImportReviewScreen = ({ route, navigation }) => {
   const { importId: routeImportId } = route.params || {};
+
+  const prefetchDetailsForMatches = (titlesArray) => {
+    if (!Array.isArray(titlesArray) || titlesArray.length === 0) return;
+
+    titlesArray.forEach((t) => {
+      const matches = Array.isArray(t?.matches) ? t.matches : [];
+      matches.forEach((m) => {
+        const mediaType = m.mediaType || 'movie';
+        const tmdbId = m.tmdbId;
+        if (!tmdbId) return;
+        const key = `${mediaType}-${tmdbId}`;
+
+        setMatchDetails((prev) => {
+          if (prev[key]) return prev;
+          return {
+            ...prev,
+            [key]: { loading: true, data: null, error: null },
+          };
+        });
+
+        (async () => {
+          try {
+            let data;
+            if (mediaType === 'tv') {
+              data = await TMDBService.getTVDetails(tmdbId);
+            } else {
+              data = await TMDBService.getMovieDetails(tmdbId);
+            }
+            setMatchDetails((prev) => ({
+              ...prev,
+              [key]: { loading: false, data, error: null },
+            }));
+          } catch (e) {
+            setMatchDetails((prev) => ({
+              ...prev,
+              [key]: {
+                loading: false,
+                data: null,
+                error: e?.message || 'Failed to load details',
+              },
+            }));
+          }
+        })();
+      });
+    });
+  };
+
   const { user } = useAuth();
   const { refreshData } = useApp();
   const insets = useSafeAreaInsets();
@@ -33,8 +82,10 @@ const ImportReviewScreen = ({ route, navigation }) => {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [details, setDetails] = useState(null);
+  const [phase, setPhase] = useState('resolve'); // 'resolve' unmatched first, then 'assign' lists
   const [selections, setSelections] = useState({}); // { extractedTitleId: { matchId, listType } }
   const [searchStates, setSearchStates] = useState({}); // { extractedTitleId: { query, year, loading } }
+  const [matchDetails, setMatchDetails] = useState({}); // { key: { loading, data, error } }
 
   useEffect(() => {
     navigation.setOptions?.({ headerShown: false });
@@ -69,6 +120,8 @@ const ImportReviewScreen = ({ route, navigation }) => {
 
         const titles = Array.isArray(data?.titles) ? data.titles : [];
         const status = data?.status || '';
+
+        prefetchDetailsForMatches(titles);
 
         const shouldPoll =
           attempts < MAX_ATTEMPTS &&
@@ -111,11 +164,51 @@ const ImportReviewScreen = ({ route, navigation }) => {
     () => titles.filter((t) => !t.matches || t.matches.length === 0),
     [titles]
   );
-
   const matched = useMemo(
     () => titles.filter((t) => t.matches && t.matches.length > 0),
     [titles]
   );
+
+  const unresolvedUnmatched = useMemo(
+    () =>
+      unmatched.filter((t) => {
+        const sel = selections[t.id];
+        return !sel || !sel.skipped;
+      }),
+    [unmatched, selections]
+  );
+
+  const assignable = useMemo(
+    () =>
+      matched.filter((t) => {
+        const sel = selections[t.id];
+        if (sel && sel.skipped) return false;
+        if (!sel) return true;
+        return !sel.matchId || !sel.listType;
+      }),
+    [matched, selections]
+  );
+
+	const allHandled = useMemo(
+		() =>
+			matched.every((t) => {
+				const sel = selections[t.id];
+				if (sel && sel.skipped) return true;
+				return !!(sel && sel.matchId && sel.listType);
+			}),
+		[matched, selections]
+	);
+
+	const hasAnyAssigned = useMemo(
+		() =>
+			matched.some((t) => {
+				const sel = selections[t.id];
+				return !!(sel && sel.matchId && sel.listType && !sel.skipped);
+			}),
+		[matched, selections]
+	);
+
+	const readyToApply = allHandled && hasAnyAssigned;
 
   const handleSelectMatch = (extractedId, matchId) => {
     setSelections((prev) => {
@@ -125,6 +218,30 @@ const ImportReviewScreen = ({ route, navigation }) => {
         [extractedId]: { ...existing, matchId },
       };
     });
+  };
+
+  const handleToggleMatch = (extractedId, matchId) => {
+    setSelections((prev) => {
+      const existing = prev[extractedId] || {};
+      const isSelected = existing.matchId === matchId;
+      const next = { ...existing };
+      if (isSelected) {
+        delete next.matchId;
+      } else {
+        next.matchId = matchId;
+      }
+      return {
+        ...prev,
+        [extractedId]: next,
+      };
+    });
+  };
+
+  const handleSkipTitle = (extractedId) => {
+    setSelections((prev) => ({
+      ...prev,
+      [extractedId]: { ...(prev[extractedId] || {}), skipped: true },
+    }));
   };
 
   const handleSelectList = (extractedId, listType) => {
@@ -183,6 +300,14 @@ const ImportReviewScreen = ({ route, navigation }) => {
         );
         return { ...prev, titles: updatedTitles };
       });
+
+      const matchesForTitle = Array.isArray(data?.matches) ? data.matches : [];
+      prefetchDetailsForMatches([
+        {
+          ...extracted,
+          matches: matchesForTitle,
+        },
+      ]);
     } catch (e) {
       console.error('Search failed', e);
       showToast(e?.message || 'Search failed');
@@ -246,32 +371,67 @@ const ImportReviewScreen = ({ route, navigation }) => {
   const renderMatchOption = (extractedId, match) => {
     const selection = selections[extractedId] || {};
     const isSelected = selection.matchId === match.id;
-    const labelTitle = match.title || match.tmdbId || 'Unknown';
-    const labelYear = match.year || '';
+    const mediaType = match.mediaType || 'movie';
+    const key = `${mediaType}-${match.tmdbId}`;
+    const info = matchDetails[key];
+    const data = info && info.data ? info.data : null;
+    const titleFromDetails = data ? data.title || data.name || data.original_title || data.original_name : null;
+    const labelTitle = titleFromDetails || match.title || (match.tmdbId ? `TMDB #${match.tmdbId}` : 'Unknown');
+    const yearFromDetails = data
+      ? TMDBService.getYear(data.release_date || data.first_air_date || '')
+      : null;
+    const baseYear = match.year || '';
+    const displayYear = baseYear || (yearFromDetails && yearFromDetails !== 'N/A' ? yearFromDetails : '');
+    const posterPath = data ? data.poster_path : null;
+    const posterUrl = posterPath ? TMDBService.getImageUrl(posterPath, 'w185') : null;
+    const voteAverage = data && typeof data.vote_average === 'number' ? TMDBService.formatVoteAverage(data.vote_average) : null;
+    const overview = data && data.overview ? data.overview : '';
+    const mediaLabel = mediaType === 'tv' ? 'TV Show' : 'Movie';
 
     return (
       <TouchableOpacity
         key={match.id}
         style={[styles.matchOption, isSelected && styles.matchOptionSelected]}
-        onPress={() => handleSelectMatch(extractedId, match.id)}
+        onPress={() => handleToggleMatch(extractedId, match.id)}
         activeOpacity={0.8}
       >
-        <View style={styles.matchHeaderRow}>
-          <Text style={styles.matchTitle} numberOfLines={2}>
-            {labelTitle}
-            {labelYear ? ` (${labelYear})` : ''}
-          </Text>
-          {isSelected && (
-            <Ionicons name="checkmark-circle" size={18} color="#10B981" />
+        <View style={styles.matchRow}>
+          {posterUrl ? (
+            <Image source={{ uri: posterUrl }} style={styles.matchPoster} />
+          ) : (
+            <View style={[styles.matchPoster, styles.matchPosterPlaceholder]}>
+              <Ionicons
+                name={mediaType === 'tv' ? 'tv-outline' : 'film-outline'}
+                size={20}
+                color="#9CA3AF"
+              />
+            </View>
           )}
+          <View style={styles.matchContent}>
+            <View style={styles.matchHeaderRow}>
+              <Text style={styles.matchTitle} numberOfLines={2}>
+                {labelTitle}
+                {displayYear ? ` (${displayYear})` : ''}
+              </Text>
+              {isSelected && (
+                <Ionicons name="checkmark-circle" size={18} color="#10B981" />
+              )}
+            </View>
+            <Text style={styles.matchMeta} numberOfLines={1}>
+              {mediaLabel}
+              {voteAverage ? ` · TMDB ${voteAverage}/10` : ''}
+              {typeof match.confidence === 'number'
+                ? ` · ${(match.confidence * 100).toFixed(0)}% match`
+                : ''}
+              {match.matchMethod ? ` · ${match.matchMethod}` : ''}
+            </Text>
+            {overview ? (
+              <Text style={styles.matchOverview} numberOfLines={3}>
+                {overview}
+              </Text>
+            ) : null}
+          </View>
         </View>
-        <Text style={styles.matchMeta}>
-          {match.mediaType === 'tv' ? 'TV' : 'Movie'} · {match.matchMethod || 'match'} ·
-          
-          {typeof match.confidence === 'number'
-            ? ` ${(match.confidence * 100).toFixed(0)}%`
-            : ''}
-        </Text>
       </TouchableOpacity>
     );
   };
@@ -307,7 +467,7 @@ const ImportReviewScreen = ({ route, navigation }) => {
   const renderMatchedItem = ({ item }) => {
     const { id, rawText, normalizedTitle, year, matches } = item;
     return (
-      <View style={styles.card}>
+      <View style={[styles.card, styles.cardFullHeight]}>
         <Text style={styles.cardTitle} numberOfLines={2}>
           {normalizedTitle || rawText}
           {year ? ` (${year})` : ''}
@@ -327,6 +487,12 @@ const ImportReviewScreen = ({ route, navigation }) => {
         </ScrollView>
 
         {renderListOptions(id)}
+
+        <View style={styles.skipRow}>
+          <TouchableOpacity onPress={() => handleSkipTitle(id)} activeOpacity={0.7}>
+            <Text style={styles.skipText}>Skip this title</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   };
@@ -383,6 +549,12 @@ const ImportReviewScreen = ({ route, navigation }) => {
             )}
           </TouchableOpacity>
         </View>
+
+			<View style={styles.skipRow}>
+				<TouchableOpacity onPress={() => handleSkipTitle(id)} activeOpacity={0.7}>
+					<Text style={styles.skipText}>Skip this title</Text>
+				</TouchableOpacity>
+			</View>
       </View>
     );
   };
@@ -439,53 +611,67 @@ const ImportReviewScreen = ({ route, navigation }) => {
     <View style={styles.container}>
       {header}
 
-      {unmatched.length > 0 && (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Unmatched Titles</Text>
+      {phase === 'resolve' ? (
+        <View style={[styles.section, { flex: 1 }]}>
+          <Text style={styles.sectionTitle}>Step 1 of 2 · Resolve Unmatched Titles</Text>
           <Text style={styles.sectionSubtitle}>
-            Use TMDB search to find the correct movie or show.
+            Review titles we could not automatically match. Search TMDB or skip them.
           </Text>
-          <FlatList
-            data={unmatched}
-            keyExtractor={(item) => `unmatched-${item.id}`}
-            renderItem={renderUnmatchedItem}
-            scrollEnabled={false}
-          />
+
+          {unresolvedUnmatched.length === 0 ? (
+            <View style={styles.resolveDoneContainer}>
+              <Text style={styles.emptyMatchesText}>
+                All unmatched titles have been handled.
+              </Text>
+              <TouchableOpacity
+                style={[styles.confirmButton, styles.resolveContinueButton]}
+                onPress={() => setPhase('assign')}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.confirmButtonText}>Continue to Assign Lists</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            renderUnmatchedItem({ item: unresolvedUnmatched[0] })
+          )}
         </View>
+      ) : (
+        <ScrollView
+          style={styles.assignScroll}
+          contentContainerStyle={styles.assignScrollContent}
+          bounces={false}
+        >
+          <View style={[styles.section, { flex: 1, paddingBottom: 120 }]}>
+            <Text style={styles.sectionTitle}>Step 2 of 2 · Assign to Lists</Text>
+            <Text style={styles.sectionSubtitle}>
+              Choose the best match and list for each title you want to import.
+            </Text>
+            {assignable.length === 0 ? (
+              <Text style={styles.emptyMatchesText}>
+                No titles left to assign. You can apply your selections below.
+              </Text>
+            ) : (
+              renderMatchedItem({ item: assignable[0] })
+            )}
+          </View>
+        </ScrollView>
       )}
 
-      <View style={[styles.section, { flex: 1 }]}>
-        <Text style={styles.sectionTitle}>Assign to Lists</Text>
-        <Text style={styles.sectionSubtitle}>
-          Choose the best match and list for each title you want to import.
-        </Text>
-        {matched.length === 0 ? (
-          <Text style={styles.emptyMatchesText}>
-            No matched titles yet. Try resolving unmatched items above.
-          </Text>
-        ) : (
-          <FlatList
-            data={matched}
-            keyExtractor={(item) => `matched-${item.id}`}
-            renderItem={renderMatchedItem}
-            contentContainerStyle={{ paddingBottom: 120 }}
-          />
-        )}
-      </View>
-
-      <View style={[styles.footer, { paddingBottom: insets.bottom + 12 }]}>
-        <TouchableOpacity
-          style={[styles.confirmButton, submitting && styles.confirmButtonDisabled]}
-          onPress={handleConfirm}
-          disabled={submitting}
-        >
-          {submitting ? (
-            <ActivityIndicator size="small" color="#FFFFFF" />
-          ) : (
-            <Text style={styles.confirmButtonText}>Apply to My Lists</Text>
-          )}
-        </TouchableOpacity>
-      </View>
+      {readyToApply && (
+        <View style={[styles.footer, { paddingBottom: insets.bottom + 12 }]}>
+          <TouchableOpacity
+            style={[styles.confirmButton, submitting && styles.confirmButtonDisabled]}
+            onPress={handleConfirm}
+            disabled={submitting}
+          >
+            {submitting ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <Text style={styles.confirmButtonText}>Apply to My Lists</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 };
@@ -580,6 +766,9 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 1,
   },
+  cardFullHeight: {
+    flex: 1,
+  },
   cardTitle: {
     fontSize: 15,
     fontWeight: '600',
@@ -591,8 +780,26 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   matchesContainer: {
-    maxHeight: 160,
+    maxHeight: 260,
     marginTop: 8,
+  },
+  matchRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  matchPoster: {
+    width: 96,
+    height: 144,
+    borderRadius: 4,
+    backgroundColor: '#E5E7EB',
+    marginRight: 10,
+  },
+  matchPosterPlaceholder: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  matchContent: {
+    flex: 1,
   },
   matchOption: {
     borderWidth: 1,
@@ -622,6 +829,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6B7280',
   },
+  matchOverview: {
+    marginTop: 4,
+    fontSize: 12,
+    color: '#4B5563',
+  },
   emptyMatchesText: {
     fontSize: 13,
     color: '#9CA3AF',
@@ -632,8 +844,8 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   listOptionPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: '#E5E7EB',
@@ -644,7 +856,7 @@ const styles = StyleSheet.create({
     borderColor: '#2563EB',
   },
   listOptionText: {
-    fontSize: 12,
+    fontSize: 13,
     color: '#374151',
     fontWeight: '500',
   },
@@ -689,6 +901,21 @@ const styles = StyleSheet.create({
   },
   searchButtonDisabled: {
     opacity: 0.6,
+  },
+  skipRow: {
+    marginTop: 8,
+    alignItems: 'flex-end',
+  },
+  skipText: {
+    fontSize: 12,
+    color: '#6B7280',
+    textDecorationLine: 'underline',
+  },
+  assignScroll: {
+    flex: 1,
+  },
+  assignScrollContent: {
+    flexGrow: 1,
   },
   footer: {
     position: 'absolute',

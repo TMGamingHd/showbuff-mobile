@@ -693,6 +693,45 @@ app.post('/api/user/reviews', requireAuth, async (req, res) => {
   }
 });
 
+// Get all reviews for the authenticated user
+app.get('/api/user/reviews', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT *
+         FROM reviews
+        WHERE user_id = $1
+        ORDER BY updated_at DESC`,
+      [req.userId]
+    );
+
+    const user = getUserById(req.userId) || req.user || null;
+    const userName = user?.username || user?.email || 'User';
+
+    const reviewsPayload = rows.map((row) => ({
+      id: `review-${row.id}`,
+      movieId: Number(row.tmdb_id),
+      movie: { id: Number(row.tmdb_id) },
+      rating: row.rating,
+      comment: row.comment,
+      tags: Array.isArray(row.tags) ? row.tags : row.tags || [],
+      isRewatched: row.is_rewatched,
+      containsSpoilers: row.contains_spoilers,
+      visibility: row.visibility,
+      userId: req.userId,
+      userName,
+      reactions: [],
+      comments: [],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return res.json(reviewsPayload);
+  } catch (error) {
+    console.error('Error fetching user reviews:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
 app.get('/api/friends', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(

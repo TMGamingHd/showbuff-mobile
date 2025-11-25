@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
 const { initDb, pool } = require('./db');
 const {
   users,
@@ -34,6 +35,7 @@ const ensureUserActivity = (userId) => {
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 
 // Enable CORS and JSON parsing
 app.use(cors());
@@ -131,9 +133,36 @@ app.post('/api/auth/login', async (req, res) => {
 
     const row = rows[0];
 
-    // TEMP: compare plaintext password to password_hash field (no hashing yet)
-    if (row.password_hash !== password) {
+    const stored = row.password_hash || '';
+    let isValid = false;
+    let newHash = null;
+
+    // If the stored value looks like a bcrypt hash, use bcrypt.compare
+    if (stored.startsWith('$2a$') || stored.startsWith('$2b$') || stored.startsWith('$2y$')) {
+      isValid = await bcrypt.compare(password, stored);
+    } else {
+      // Backward-compat: treat stored value as plaintext from the early phase
+      if (stored === password) {
+        isValid = true;
+        // On successful login, upgrade to bcrypt hash
+        newHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+      }
+    }
+
+    if (!isValid) {
       return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    // Persist upgraded hash if needed
+    if (newHash) {
+      try {
+        await pool.query(
+          'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+          [newHash, row.id]
+        );
+      } catch (err) {
+        console.error('Failed to upgrade password hash for user', row.id, err);
+      }
     }
 
     // Keep in-memory representation in sync for the rest of the app
@@ -141,7 +170,6 @@ app.post('/api/auth/login', async (req, res) => {
       id: row.id,
       username: row.username,
       email: row.email,
-      password: row.password_hash,
     });
 
     const token = issueTokenForUser(row.id);
@@ -170,10 +198,13 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(409).json({ message: 'Email already registered' });
     }
 
-    // Insert new user into Postgres (store plaintext password in password_hash for now)
+    // Hash password before storing in Postgres
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+    // Insert new user into Postgres with hashed password
     const insert = await pool.query(
       'INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3) RETURNING id, email, username',
-      [email, username, password]
+      [email, username, passwordHash]
     );
 
     const user = insert.rows[0];
@@ -183,7 +214,6 @@ app.post('/api/auth/register', async (req, res) => {
       id: user.id,
       username: user.username,
       email: user.email,
-      password,
     });
 
     const token = issueTokenForUser(user.id);

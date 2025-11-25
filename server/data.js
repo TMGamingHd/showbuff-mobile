@@ -3,11 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 
 // Start with demo account and tony account
-const users = [
-  { id: 1, username: 'demo', email: 'demo@showbuff.com', password: 'demo123' },
-  { id: 2, username: 'tony', email: 'tony@gmail.com', password: 'tony123' },
-  { id: 3, username: 'alice', email: 'alice@test.com', password: 'alice123' }
-];
+const users = [];
 
 // Token map: token -> userId (kept for backward compatibility/logging)
 const tokens = new Map();
@@ -97,6 +93,16 @@ function getUserById(id) {
   return users.find(u => Number(u.id) === Number(id));
 }
 
+function upsertInMemoryUser(user) {
+  if (!user || typeof user.id === 'undefined') return;
+  const idx = users.findIndex(u => Number(u.id) === Number(user.id));
+  if (idx >= 0) {
+    users[idx] = { ...users[idx], ...user };
+  } else {
+    users.push(user);
+  }
+}
+
 function ensureUserLists(userId) {
   if (!lists.has(userId)) {
     lists.set(userId, { watchlist: [], 'currently-watching': [], watched: [] });
@@ -133,6 +139,7 @@ module.exports = {
   validateToken,
   getUserIdFromToken,
   getUserById,
+  upsertInMemoryUser,
   ensureUserLists,
   upsertShow,
 };

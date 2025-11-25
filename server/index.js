@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { initDb } = require('./db');
+const { initDb, pool } = require('./db');
 const {
   users,
   tokens,
@@ -19,6 +19,7 @@ const {
   validateToken,
   getUserIdFromToken,
   getUserById,
+  upsertInMemoryUser,
   ensureUserLists,
   upsertShow,
 } = require('./data');
@@ -66,52 +67,132 @@ function getTokenFromHeader(req) {
   return null;
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const token = getTokenFromHeader(req);
   if (!token || !validateToken(token)) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
+
+  const userId = getUserIdFromToken(token);
+  if (!userId) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  let user = getUserById(userId);
+
+  // If user is not in memory (e.g., after server restart), attempt to load from Postgres
+  if (!user) {
+    try {
+      const { rows } = await pool.query(
+        'SELECT id, email, username FROM users WHERE id = $1',
+        [userId]
+      );
+
+      if (!rows.length) {
+        return res.status(401).json({ message: 'Unauthorized' });
+      }
+
+      const row = rows[0];
+      user = {
+        id: row.id,
+        email: row.email,
+        username: row.username,
+      };
+
+      // Mirror into in-memory map for downstream helpers
+      upsertInMemoryUser(user);
+    } catch (err) {
+      console.error('Error loading user in requireAuth:', err);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  }
+
   req.token = token;
-  req.userId = getUserIdFromToken(token);
-  req.user = getUserById(req.userId);
+  req.userId = userId;
+  req.user = user;
   next();
 }
 
 // ===== Auth endpoints =====
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
   if (!email) return res.status(400).json({ message: 'Email required' });
   if (!password) return res.status(400).json({ message: 'Password required' });
-  
-  const user = getUserByEmail(email);
-  if (!user) {
-    return res.status(401).json({ message: 'Invalid email or password' });
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, email, username, password_hash FROM users WHERE email = $1',
+      [email]
+    );
+
+    if (!rows.length) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    const row = rows[0];
+
+    // TEMP: compare plaintext password to password_hash field (no hashing yet)
+    if (row.password_hash !== password) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    // Keep in-memory representation in sync for the rest of the app
+    upsertInMemoryUser({
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      password: row.password_hash,
+    });
+
+    const token = issueTokenForUser(row.id);
+    ensureUserLists(row.id);
+    return res.json({ token, user: { id: row.id, username: row.username, email: row.email } });
+  } catch (err) {
+    console.error('Error during login:', err);
+    return res.status(500).json({ message: 'Internal server error' });
   }
-  
-  // Validate password
-  if (user.password !== password) {
-    return res.status(401).json({ message: 'Invalid email or password' });
-  }
-  
-  const token = issueTokenForUser(user.id);
-  ensureUserLists(user.id);
-  return res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
 });
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { username, email, password } = req.body || {};
   if (!email) return res.status(400).json({ message: 'Email required' });
   if (!password) return res.status(400).json({ message: 'Password required' });
   if (!username) return res.status(400).json({ message: 'Username required' });
-  
-  const user = createUser({ username, email, password });
-  if (!user) {
-    return res.status(409).json({ message: 'Email already registered' });
+
+  try {
+    // Check for existing email or username in Postgres
+    const existing = await pool.query(
+      'SELECT id FROM users WHERE email = $1 OR username = $2',
+      [email, username]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ message: 'Email already registered' });
+    }
+
+    // Insert new user into Postgres (store plaintext password in password_hash for now)
+    const insert = await pool.query(
+      'INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3) RETURNING id, email, username',
+      [email, username, password]
+    );
+
+    const user = insert.rows[0];
+
+    // Mirror into in-memory users array for compatibility with the rest of the app
+    upsertInMemoryUser({
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      password,
+    });
+
+    const token = issueTokenForUser(user.id);
+    ensureUserLists(user.id);
+    return res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
+  } catch (err) {
+    console.error('Error during registration:', err);
+    return res.status(500).json({ message: 'Internal server error' });
   }
-  
-  const token = issueTokenForUser(user.id);
-  ensureUserLists(user.id);
-  return res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
 });
 
 app.post('/api/auth/logout', requireAuth, (req, res) => {

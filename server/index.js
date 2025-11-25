@@ -376,19 +376,97 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
 });
 
 // ===== User profile =====
-app.get('/api/user/profile/:userId', requireAuth, (req, res) => {
-  const user = getUserById(req.params.userId);
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  return res.json({ ...user });
+app.get('/api/user/profile/:userId', requireAuth, async (req, res) => {
+  const userId = Number(req.params.userId);
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, username, email, avatar_url, bio FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const row = rows[0];
+
+    // Keep in-memory cache in sync
+    upsertInMemoryUser({ id: row.id, username: row.username, email: row.email });
+
+    return res.json({
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      avatarUrl: row.avatar_url || null,
+      bio: row.bio || null,
+    });
+  } catch (err) {
+    console.error('Error fetching user profile:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-app.put('/api/user/profile/:userId', requireAuth, (req, res) => {
-  const user = getUserById(req.params.userId);
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  const { username, email } = req.body || {};
-  if (username) user.username = username;
-  if (email) user.email = email;
-  return res.json({ ...user });
+app.put('/api/user/profile/:userId', requireAuth, async (req, res) => {
+  const userId = Number(req.params.userId);
+  const { username, email, avatarUrl, bio } = req.body || {};
+
+  if (!username && !email && typeof avatarUrl === 'undefined' && typeof bio === 'undefined') {
+    return res.status(400).json({ message: 'No profile fields provided' });
+  }
+
+  try {
+    const fields = [];
+    const values = [];
+
+    if (typeof username === 'string') {
+      fields.push('username');
+      values.push(username);
+    }
+    if (typeof email === 'string') {
+      fields.push('email');
+      values.push(email);
+    }
+    if (typeof avatarUrl !== 'undefined') {
+      fields.push('avatar_url');
+      values.push(avatarUrl);
+    }
+    if (typeof bio !== 'undefined') {
+      fields.push('bio');
+      values.push(bio);
+    }
+
+    const setClauses = fields.map((f, idx) => `${f} = $${idx + 1}`).join(', ');
+    values.push(userId);
+
+    const { rows } = await pool.query(
+      `UPDATE users
+         SET ${setClauses}, updated_at = NOW()
+       WHERE id = $${values.length}
+       RETURNING id, username, email, avatar_url, bio`,
+      values
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const row = rows[0];
+
+    // Sync in-memory cache
+    upsertInMemoryUser({ id: row.id, username: row.username, email: row.email });
+
+    return res.json({
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      avatarUrl: row.avatar_url || null,
+      bio: row.bio || null,
+    });
+  } catch (err) {
+    console.error('Error updating user profile:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // ===== Lists =====
@@ -541,62 +619,99 @@ app.post('/api/user/copy-from-friend', requireAuth, async (req, res) => {
 });
 
 // ===== Reviews =====
-app.post('/api/user/reviews', requireAuth, (req, res) => {
+app.post('/api/user/reviews', requireAuth, async (req, res) => {
+  const { showId, rating, comment, movie, tags, isRewatched, containsSpoilers, visibility } = req.body || {};
+  if (!showId && !movie?.id) return res.status(400).json({ message: 'showId or movie required' });
+
+  const movieId = Number(showId || movie.id);
+  const mediaType = movie?.media_type || 'movie';
+
   try {
-    const { showId, rating, comment, movie, tags, isRewatched, containsSpoilers, visibility } = req.body || {};
-    if (!showId && !movie?.id) return res.status(400).json({ message: 'showId or movie required' });
-    
-    const movieId = showId || movie.id;
-    const arr = reviews.get(req.userId) || [];
     const user = getUserById(req.userId);
-    
+
     // Check if user already has a review for this movie
-    const existingReviewIndex = arr.findIndex(r => Number(r.movieId) === Number(movieId));
-    const isEditing = existingReviewIndex !== -1;
-    
-    const reviewData = { 
-      movieId: Number(movieId),
+    const existing = await pool.query(
+      'SELECT id, created_at FROM reviews WHERE user_id = $1 AND tmdb_id = $2 AND media_type = $3',
+      [req.userId, movieId, mediaType]
+    );
+
+    const isEditing = existing.rows.length > 0;
+    let reviewRow;
+
+    if (isEditing) {
+      const id = existing.rows[0].id;
+      await pool.query(
+        `UPDATE reviews
+           SET rating = $1,
+               comment = $2,
+               tags = $3,
+               is_rewatched = $4,
+               contains_spoilers = $5,
+               visibility = $6,
+               updated_at = NOW()
+         WHERE id = $7`,
+        [
+          Number(rating) || 0,
+          comment || '',
+          JSON.stringify(tags || []),
+          Boolean(isRewatched),
+          Boolean(containsSpoilers),
+          visibility || 'friends',
+          id,
+        ]
+      );
+
+      const { rows } = await pool.query(
+        'SELECT * FROM reviews WHERE id = $1',
+        [id]
+      );
+      reviewRow = rows[0];
+    } else {
+      const { rows } = await pool.query(
+        `INSERT INTO reviews
+         (user_id, tmdb_id, media_type, rating, comment, tags, is_rewatched, contains_spoilers, visibility)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+         RETURNING *`,
+        [
+          req.userId,
+          movieId,
+          mediaType,
+          Number(rating) || 0,
+          comment || '',
+          JSON.stringify(tags || []),
+          Boolean(isRewatched),
+          Boolean(containsSpoilers),
+          visibility || 'friends',
+        ]
+      );
+      reviewRow = rows[0];
+    }
+
+    const createdAt = reviewRow.created_at;
+    const updatedAt = reviewRow.updated_at;
+
+    const review = {
+      id: `review-${reviewRow.id}`,
+      movieId,
       movie: movie || { id: movieId, title: 'Unknown Movie' },
-      rating: Number(rating) || 0, 
-      comment: comment || '',
-      tags: tags || [],
-      isRewatched: Boolean(isRewatched),
-      containsSpoilers: Boolean(containsSpoilers),
-      visibility: visibility || 'friends',
+      rating: reviewRow.rating,
+      comment: reviewRow.comment,
+      tags: Array.isArray(reviewRow.tags) ? reviewRow.tags : reviewRow.tags || [],
+      isRewatched: reviewRow.is_rewatched,
+      containsSpoilers: reviewRow.contains_spoilers,
+      visibility: reviewRow.visibility,
       userId: req.userId,
       userName: user?.username || user?.email || 'User',
       reactions: [],
-      comments: []
+      comments: [],
+      createdAt,
+      updatedAt,
     };
-    
-    let review;
-    if (isEditing) {
-      // Update existing review
-      const existingReview = arr[existingReviewIndex];
-      review = {
-        ...existingReview,
-        ...reviewData,
-        id: existingReview.id, // Keep original ID
-        createdAt: existingReview.createdAt, // Keep original creation date
-        updatedAt: new Date().toISOString() // Add update timestamp
-      };
-      arr[existingReviewIndex] = review;
-    } else {
-      // Create new review
-      review = {
-        id: `${req.userId}-${movieId}-${Date.now()}`,
-        createdAt: new Date().toISOString(),
-        ...reviewData
-      };
-      arr.push(review);
-    }
-    
-    reviews.set(req.userId, arr);
-    
-    // Add to activity feed for social visibility
-    const activity = activities.get('global') || [];
-    if (visibility === 'public' || visibility === 'friends') {
-      activity.unshift({
+
+    // Add to activity feed for social visibility (still in-memory for now)
+    const globalActivity = activities.get('global') || [];
+    if (review.visibility === 'public' || review.visibility === 'friends') {
+      globalActivity.unshift({
         id: `activity-${Date.now()}`,
         type: 'review',
         action: isEditing ? 'updated' : 'reviewed',
@@ -606,11 +721,11 @@ app.post('/api/user/reviews', requireAuth, (req, res) => {
         rating: review.rating,
         content: review.comment,
         createdAt: review.createdAt,
-        visibility: review.visibility
+        visibility: review.visibility,
       });
-      activities.set('global', activity.slice(0, 50)); // Keep last 50 activities
+      activities.set('global', globalActivity.slice(0, 50));
     }
-    
+
     // Add to user's personal activity feed
     const userActivities = activities.get(req.userId) || [];
     userActivities.unshift({
@@ -624,45 +739,86 @@ app.post('/api/user/reviews', requireAuth, (req, res) => {
       moviePoster: review.movie?.poster_path,
       rating: review.rating,
       comment: review.comment,
-      createdAt: review.createdAt
+      createdAt: review.createdAt,
     });
-    activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
-    
-    // Update the post in activities to include like count
-    const updatePostInActivities = (activityMap, postId, likeCount) => {
-      for (const [key, activities] of activityMap.entries()) {
-        const postIndex = activities.findIndex(a => a.id === postId);
-        if (postIndex >= 0) {
-          activities[postIndex].reactions = likeCount;
-          activities[postIndex].likeCount = likeCount;
-        }
-      }
-    };
-    
-    updatePostInActivities(activities, review.id, review.reactions.length);
-    
-    return res.json({ 
-      success: true, 
-      review, 
-      isEditing 
-    });
+    activities.set(req.userId, userActivities.slice(0, 100));
+
+    return res.json({ success: true, review, isEditing });
   } catch (error) {
     console.error('Error managing review:', error);
     return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
 });
 
-app.get('/api/user/reviews', requireAuth, (req, res) => {
-  return res.json(reviews.get(req.userId) || []);
+app.get('/api/user/reviews', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM reviews WHERE user_id = $1 ORDER BY updated_at DESC',
+      [req.userId]
+    );
+
+    const user = getUserById(req.userId);
+
+    const result = rows.map((row) => ({
+      id: `review-${row.id}`,
+      movieId: Number(row.tmdb_id),
+      movie: { id: Number(row.tmdb_id) },
+      rating: row.rating,
+      comment: row.comment,
+      tags: Array.isArray(row.tags) ? row.tags : row.tags || [],
+      isRewatched: row.is_rewatched,
+      containsSpoilers: row.contains_spoilers,
+      visibility: row.visibility,
+      userId: req.userId,
+      userName: user?.username || user?.email || 'User',
+      reactions: [],
+      comments: [],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return res.json(result);
+  } catch (error) {
+    console.error('Error fetching user reviews:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
 });
 
-app.get('/api/movie/:showId/reviews', requireAuth, (req, res) => {
+app.get('/api/movie/:showId/reviews', requireAuth, async (req, res) => {
   const showId = Number(req.params.showId);
-  const all = [];
-  for (const [uid, arr] of reviews.entries()) {
-    for (const r of arr) if (Number(r.movieId) === showId) all.push({ ...r, userId: uid });
+  try {
+    const { rows } = await pool.query(
+      `SELECT r.*, u.username, u.email
+       FROM reviews r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.tmdb_id = $1
+       ORDER BY r.updated_at DESC`,
+      [showId]
+    );
+
+    const result = rows.map((row) => ({
+      id: `review-${row.id}`,
+      movieId: Number(row.tmdb_id),
+      movie: { id: Number(row.tmdb_id) },
+      rating: row.rating,
+      comment: row.comment,
+      tags: Array.isArray(row.tags) ? row.tags : row.tags || [],
+      isRewatched: row.is_rewatched,
+      containsSpoilers: row.contains_spoilers,
+      visibility: row.visibility,
+      userId: row.user_id,
+      userName: row.username || row.email,
+      reactions: [],
+      comments: [],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return res.json(result);
+  } catch (error) {
+    console.error('Error fetching movie reviews:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
-  return res.json(all);
 });
 
 // ===== Friends =====

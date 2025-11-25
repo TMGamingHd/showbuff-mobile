@@ -1363,17 +1363,41 @@ app.get('/api/feed/social', requireAuth, (req, res) => {
   }
 });
 
-// ===== Missing Messaging Endpoints =====
+// ===== Messaging (Postgres-backed) =====
 // Get conversations
-app.get('/api/messages/conversations', requireAuth, (req, res) => {
+app.get('/api/messages/conversations', requireAuth, async (req, res) => {
   try {
-    const userFriends = friends.get(req.userId) || [];
-    const conversations = userFriends.map(friend => ({
-      friendId: friend.id,
-      friendName: friend.username,
-      lastMessage: null,
-      unreadCount: 0
-    }));
+    // Start from friends list (Postgres-backed)
+    const friendsRes = await pool.query(
+      `SELECT u.id, u.username
+       FROM friends f
+       JOIN users u ON u.id = f.friend_user_id
+       WHERE f.user_id = $1
+       ORDER BY u.username`,
+      [req.userId]
+    );
+
+    const userFriends = friendsRes.rows.map((row) => ({ id: row.id, username: row.username }));
+
+    // For each friend, compute unread count from messages table
+    const conversations = [];
+    for (const friend of userFriends) {
+      const unreadRes = await pool.query(
+        `SELECT COUNT(*) AS count
+         FROM messages
+         WHERE sender_id = $1 AND receiver_id = $2 AND read_at IS NULL`,
+        [friend.id, req.userId]
+      );
+      const unreadCount = parseInt(unreadRes.rows[0]?.count || '0', 10);
+
+      conversations.push({
+        friendId: friend.id,
+        friendName: friend.username,
+        lastMessage: null, // Placeholder for now; UI currently doesn't depend on it
+        unreadCount,
+      });
+    }
+
     return res.json(conversations);
   } catch (error) {
     console.error('Error fetching conversations:', error);
@@ -1382,16 +1406,36 @@ app.get('/api/messages/conversations', requireAuth, (req, res) => {
 });
 
 // Get messages with a friend
-app.get('/api/messages/conversation/:friendId', requireAuth, (req, res) => {
+app.get('/api/messages/conversation/:friendId', requireAuth, async (req, res) => {
+  const friendId = Number(req.params.friendId);
+
   try {
-    const friendId = Number(req.params.friendId);
-    const conversationKey = [req.userId, friendId].sort().join('->');
-    const conversation = messages.get(conversationKey) || [];
-    console.log(`[DEBUG] Fetching conversation for users ${req.userId} and ${friendId}`);
-    console.log(`[DEBUG] Conversation key: ${conversationKey}`);
-    console.log(`[DEBUG] Found ${conversation.length} messages`);
-    console.log(`[DEBUG] All conversation keys:`, Array.from(messages.keys()));
-    return res.json({ messages: conversation });
+    const { rows } = await pool.query(
+      `SELECT
+         m.id,
+         m.sender_id,
+         m.receiver_id,
+         su.username AS sender_username,
+         ru.username AS receiver_username,
+         m.message_type,
+         m.text AS message_text,
+         m.tmdb_id,
+         m.media_type,
+         m.movie_payload AS movie_data,
+         m.created_at
+       FROM messages m
+       JOIN users su ON su.id = m.sender_id
+       JOIN users ru ON ru.id = m.receiver_id
+       WHERE (m.sender_id = $1 AND m.receiver_id = $2)
+          OR (m.sender_id = $2 AND m.receiver_id = $1)
+       ORDER BY m.created_at ASC`,
+      [req.userId, friendId]
+    );
+
+    console.log(`[DEBUG] Fetching conversation (DB) for users ${req.userId} and ${friendId}`);
+    console.log(`[DEBUG] Found ${rows.length} messages`);
+
+    return res.json({ messages: rows });
   } catch (error) {
     console.error('Error fetching messages:', error);
     return res.status(500).json({ message: 'Internal server error', error: error.message });
@@ -1399,37 +1443,26 @@ app.get('/api/messages/conversation/:friendId', requireAuth, (req, res) => {
 });
 
 // Send a message
-app.post('/api/messages/send', requireAuth, (req, res) => {
+app.post('/api/messages/send', requireAuth, async (req, res) => {
+  const { receiverId, friendId, messageText, content } = req.body || {};
+  const targetId = receiverId || friendId;
+  const text = messageText || content;
+
+  if (!targetId || !text) {
+    return res.status(400).json({ message: 'receiverId and messageText required' });
+  }
+
   try {
-    const { receiverId, friendId, messageText, content } = req.body || {};
-    const targetId = receiverId || friendId;
-    const text = messageText || content;
-    
-    if (!targetId || !text) {
-      return res.status(400).json({ message: 'receiverId and messageText required' });
-    }
-    
-    const conversationKey = [req.userId, Number(targetId)].sort().join('->');
-    const conversation = messages.get(conversationKey) || [];
-    
-    const message = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      sender_id: req.userId,
-      receiver_id: Number(targetId),
-      message_text: text,
-      message_type: 'text',
-      read_by_receiver: false, // Track read status
-      created_at: new Date().toISOString()
-    };
-    
-    conversation.push(message);
-    messages.set(conversationKey, conversation);
-    
-    console.log(`[DEBUG] Storing message for users ${req.userId} and ${targetId}`);
-    console.log(`[DEBUG] Conversation key: ${conversationKey}`);
-    console.log(`[DEBUG] Total messages in conversation: ${conversation.length}`);
-    console.log(`[DEBUG] All conversation keys after store:`, Array.from(messages.keys()));
-    
+    const { rows } = await pool.query(
+      `INSERT INTO messages (sender_id, receiver_id, message_type, text)
+       VALUES ($1, $2, 'text', $3)
+       RETURNING id, sender_id, receiver_id, message_type,
+                 text AS message_text, tmdb_id, media_type,
+                 movie_payload AS movie_data, created_at`,
+      [req.userId, Number(targetId), text]
+    );
+
+    const message = rows[0];
     return res.json({ success: true, message });
   } catch (error) {
     console.error('Error sending message:', error);
@@ -1438,39 +1471,37 @@ app.post('/api/messages/send', requireAuth, (req, res) => {
 });
 
 // Send movie recommendation
-app.post('/api/messages/send-movie', requireAuth, (req, res) => {
+app.post('/api/messages/send-movie', requireAuth, async (req, res) => {
+  const { receiverId, friendId, movieId, tmdbId, messageText, content, movie } = req.body || {};
+  const targetId = receiverId || friendId;
+  const text = messageText || content || 'Shared a movie with you';
+  const movieData = movie || null;
+
+  if (!targetId) {
+    return res.status(400).json({ message: 'receiverId required' });
+  }
+
+  const effectiveTmdbId = tmdbId || movieId || movieData?.id || null;
+  const mediaType = movieData?.media_type || 'movie';
+
   try {
-    const { receiverId, friendId, movieId, tmdbId, messageText, content, movie } = req.body || {};
-    const targetId = receiverId || friendId;
-    const text = messageText || content || 'Shared a movie with you';
-    const movieData = movie;
-    
-    if (!targetId) {
-      return res.status(400).json({ message: 'receiverId required' });
-    }
-    
-    const conversationKey = [req.userId, Number(targetId)].sort().join('->');
-    const conversation = messages.get(conversationKey) || [];
-    
-    const message = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      sender_id: req.userId,
-      receiver_id: Number(targetId),
-      message_text: text,
-      message_type: 'movie_recommendation',
-      tmdb_id: tmdbId || movieId,
-      movie_data: movieData,
-      // Add enrichment-compatible fields
-      movieId: movieData?.id || movieData?.tmdbId || tmdbId || movieId,
-      movieTitle: movieData?.title || movieData?.name,
-      moviePoster: movieData?.poster_path,
-      read_by_receiver: false, // Track read status
-      created_at: new Date().toISOString()
-    };
-    
-    conversation.push(message);
-    messages.set(conversationKey, conversation);
-    
+    const { rows } = await pool.query(
+      `INSERT INTO messages (sender_id, receiver_id, message_type, text, tmdb_id, media_type, movie_payload)
+       VALUES ($1, $2, 'movie_recommendation', $3, $4, $5, $6::jsonb)
+       RETURNING id, sender_id, receiver_id, message_type,
+                 text AS message_text, tmdb_id, media_type,
+                 movie_payload AS movie_data, created_at`,
+      [
+        req.userId,
+        Number(targetId),
+        text,
+        effectiveTmdbId,
+        mediaType,
+        movieData ? JSON.stringify(movieData) : null,
+      ]
+    );
+
+    const message = rows[0];
     return res.json({ success: true, message });
   } catch (error) {
     console.error('Error sending movie:', error);
@@ -1479,23 +1510,17 @@ app.post('/api/messages/send-movie', requireAuth, (req, res) => {
 });
 
 // Mark messages as read
-app.put('/api/messages/mark-read/:friendId', requireAuth, (req, res) => {
+app.put('/api/messages/mark-read/:friendId', requireAuth, async (req, res) => {
+  const friendId = Number(req.params.friendId);
+
   try {
-    const userId = req.userId;
-    const friendId = Number(req.params.friendId);
-    
-    const conversationKey = [userId, friendId].sort().join('->');
-    const conversation = messages.get(conversationKey) || [];
-    
-    // Mark all messages from the friend as read
-    conversation.forEach(message => {
-      if (message.sender_id === friendId && message.receiver_id === userId) {
-        message.read_by_receiver = true;
-      }
-    });
-    
-    messages.set(conversationKey, conversation);
-    
+    await pool.query(
+      `UPDATE messages
+         SET read_at = NOW()
+       WHERE receiver_id = $1 AND sender_id = $2 AND read_at IS NULL`,
+      [req.userId, friendId]
+    );
+
     return res.json({ success: true });
   } catch (error) {
     console.error('Error marking messages as read:', error);
@@ -1503,31 +1528,22 @@ app.put('/api/messages/mark-read/:friendId', requireAuth, (req, res) => {
   }
 });
 
-// Get unread message counts
-app.get('/api/messages/unread-counts', requireAuth, (req, res) => {
+// Get unread message counts (per friend)
+app.get('/api/messages/unread-counts', requireAuth, async (req, res) => {
   try {
-    const userId = req.userId;
+    const { rows } = await pool.query(
+      `SELECT sender_id, COUNT(*) AS count
+       FROM messages
+       WHERE receiver_id = $1 AND read_at IS NULL
+       GROUP BY sender_id`,
+      [req.userId]
+    );
+
     const unreadCounts = {};
-    
-    // Check all conversations for unread messages
-    for (const [conversationKey, messageList] of messages.entries()) {
-      const [user1, user2] = conversationKey.split('->').map(Number);
-      
-      // Only check conversations involving the current user
-      if (user1 === userId || user2 === userId) {
-        const otherUserId = user1 === userId ? user2 : user1;
-        
-        // Count unread messages (messages sent by other user that haven't been read)
-        const unreadCount = messageList.filter(msg => 
-          msg.sender_id === otherUserId && !msg.read_by_receiver
-        ).length;
-        
-        if (unreadCount > 0) {
-          unreadCounts[otherUserId] = unreadCount;
-        }
-      }
+    for (const row of rows) {
+      unreadCounts[row.sender_id] = parseInt(row.count || '0', 10);
     }
-    
+
     return res.json(unreadCounts);
   } catch (error) {
     console.error('Error fetching unread counts:', error);
@@ -1536,32 +1552,27 @@ app.get('/api/messages/unread-counts', requireAuth, (req, res) => {
 });
 
 // Get total unread count
-app.get('/api/messages/total-unread', requireAuth, (req, res) => {
+app.get('/api/messages/total-unread', requireAuth, async (req, res) => {
   try {
-    const userId = req.userId;
-    let totalUnread = 0;
-    
-    // Count all unread messages across all conversations
-    for (const [conversationKey, messageList] of messages.entries()) {
-      const [user1, user2] = conversationKey.split('->').map(Number);
-      
-      // Only check conversations involving the current user
-      if (user1 === userId || user2 === userId) {
-        const otherUserId = user1 === userId ? user2 : user1;
-        
-        // Count unread messages from other user
-        const unreadCount = messageList.filter(msg => 
-          msg.sender_id === otherUserId && !msg.read_by_receiver
-        ).length;
-        
-        totalUnread += unreadCount;
-      }
-    }
-    
-    // Add pending friend requests to total
-    const pendingRequests = friendRequests.get(userId) || [];
-    totalUnread += pendingRequests.length;
-    
+    // Unread messages for the user
+    const unreadRes = await pool.query(
+      `SELECT COUNT(*) AS count
+       FROM messages
+       WHERE receiver_id = $1 AND read_at IS NULL`,
+      [req.userId]
+    );
+    const unreadMessages = parseInt(unreadRes.rows[0]?.count || '0', 10);
+
+    // Pending friend requests for the user
+    const reqRes = await pool.query(
+      `SELECT COUNT(*) AS count
+       FROM friend_requests
+       WHERE to_user_id = $1 AND status = 'pending'`,
+      [req.userId]
+    );
+    const pendingRequests = parseInt(reqRes.rows[0]?.count || '0', 10);
+
+    const totalUnread = unreadMessages + pendingRequests;
     return res.json({ total: totalUnread });
   } catch (error) {
     console.error('Error fetching total unread:', error);

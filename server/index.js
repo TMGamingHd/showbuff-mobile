@@ -1282,7 +1282,8 @@ app.get('/api/feed/social', requireAuth, async (req, res) => {
       `SELECT a.*, u.username, u.email
        FROM activities a
        JOIN users u ON u.id = a.user_id
-       WHERE a.visibility = 'public' OR a.visibility = 'friends'
+       WHERE a.type = 'post'
+         AND (a.visibility = 'public' OR a.visibility = 'friends')
        ORDER BY a.created_at DESC
        LIMIT 100`
     );

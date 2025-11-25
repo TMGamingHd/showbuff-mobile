@@ -1275,52 +1275,88 @@ app.get('/api/friends/:friendId/movies', requireAuth, async (req, res) => {
   }
 });
 
-// ===== Activity =====
-// Create a text post (with optional movie) and add to activity feeds
-app.post('/api/activity/create-post', requireAuth, (req, res) => {
+// ===== Activity (Postgres-backed) =====
+// Helper to map an activities row + in-memory like/comment state into the post shape
+function mapActivityRowToPost(row) {
+  const postId = String(row.id);
+
+  // In-memory likes/comments are keyed by postId (string)
+  const likesSet = postLikes.get(postId) || new Set();
+  const commentsArr = postComments.get(postId) || [];
+
+  const movie = row.tmdb_id
+    ? {
+        id: row.tmdb_id,
+        tmdbId: row.tmdb_id,
+        title: row.movie_title,
+        name: row.movie_title,
+        poster_path: row.movie_poster,
+        media_type: row.media_type,
+      }
+    : null;
+
+  const movieId = movie?.id;
+  const movieTitle = movie?.title || movie?.name;
+  const moviePoster = movie?.poster_path;
+
+  return {
+    id: postId,
+    type: row.type,
+    action: row.action,
+    userId: row.user_id,
+    userName: row.username || row.user_name || row.email || 'User',
+    content: row.comment,
+    visibility: row.visibility || 'friends',
+    movie,
+    movieId,
+    movieTitle,
+    moviePoster,
+    createdAt: row.created_at,
+    reactions: Array.from(likesSet),
+    comments: commentsArr.length,
+    likeCount: likesSet.size,
+    commentCount: commentsArr.length,
+  };
+}
+
+// Create a text post (with optional movie) and persist to activities table
+app.post('/api/activity/create-post', requireAuth, async (req, res) => {
+  const { content, visibility = 'friends', movie } = req.body || {};
+  const text = String(content || '').trim();
+
+  if (!text) {
+    return res.status(400).json({ message: 'content is required' });
+  }
+
   try {
-    const { content, visibility = 'friends', movie } = req.body || {};
-    const text = String(content || '').trim();
-    if (!text) {
-      return res.status(400).json({ message: 'content is required' });
-    }
-
     const user = getUserById(req.userId);
-    const createdAt = new Date().toISOString();
-    const post = {
-      id: `activity-${Date.now()}`,
-      type: 'post',
-      action: 'created',
-      userId: req.userId,
-      userName: user?.username || user?.email || 'User',
-      content: text,
-      visibility: visibility || 'friends',
-      movie: movie || null,
-      // Extract movie fields for enrichment system compatibility
-      movieId: movie?.id || movie?.tmdbId,
-      movieTitle: movie?.title || movie?.name,
-      moviePoster: movie?.poster_path,
-      createdAt,
-    };
 
-    // Initialize post with zero reactions and comments
-    post.reactions = [];
-    post.comments = 0;
-    post.likeCount = 0;
-    post.commentCount = 0;
+    const tmdbId = movie?.id || movie?.tmdbId || null;
+    const mediaType = movie?.media_type || 'movie';
+    const movieTitle = movie?.title || movie?.name || null;
+    const moviePoster = movie?.poster_path || null;
 
-    // Add to user's personal activity feed
-    const userActivities = activities.get(req.userId) || [];
-    userActivities.unshift(post);
-    activities.set(req.userId, userActivities.slice(0, 100));
+    const { rows } = await pool.query(
+      `INSERT INTO activities (user_id, type, action, comment, visibility, tmdb_id, media_type, movie_title, movie_poster)
+       VALUES ($1, 'post', 'created', $2, $3, $4, $5, $6, $7)
+       RETURNING id, user_id, type, action, comment, visibility, tmdb_id, media_type, movie_title, movie_poster, created_at`,
+      [
+        req.userId,
+        text,
+        visibility || 'friends',
+        tmdbId,
+        mediaType,
+        movieTitle,
+        moviePoster,
+      ]
+    );
 
-    // Add to global activity if visible beyond self
-    if (post.visibility === 'public' || post.visibility === 'friends') {
-      const global = activities.get('global') || [];
-      global.unshift(post);
-      activities.set('global', global.slice(0, 50));
-    }
+    const row = rows[0];
+    // Attach username/email for mapping helper
+    row.username = user?.username || null;
+    row.email = user?.email || null;
 
+    const post = mapActivityRowToPost(row);
     return res.json({ success: true, post });
   } catch (error) {
     console.error('Error creating post:', error);
@@ -1328,35 +1364,77 @@ app.post('/api/activity/create-post', requireAuth, (req, res) => {
   }
 });
 
-// ===== Missing Activity Endpoints =====
-// Get user's activity feed
-app.get('/api/user/activity', requireAuth, (req, res) => {
+// Get friends+own activity feed
+app.get('/api/user/activity', requireAuth, async (req, res) => {
   try {
-    const userActivities = activities.get(req.userId) || [];
-    return res.json(userActivities);
+    // Load friend user IDs
+    const { rows: friendRows } = await pool.query(
+      'SELECT friend_user_id FROM friends WHERE user_id = $1',
+      [req.userId]
+    );
+
+    const friendIds = friendRows.map((r) => r.friend_user_id);
+    const allIds = Array.from(new Set([req.userId, ...friendIds]));
+
+    const { rows } = await pool.query(
+      `SELECT a.*, u.username, u.email
+       FROM activities a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.user_id = ANY($1::bigint[])
+       ORDER BY a.created_at DESC
+       LIMIT 100`,
+      [allIds]
+    );
+
+    const feed = rows.map(mapActivityRowToPost);
+    return res.json(feed);
   } catch (error) {
     console.error('Error fetching user activity:', error);
     return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
 });
 
-// Get user's specific activity by ID
-app.get('/api/user/:userId/activity', requireAuth, (req, res) => {
+// Get a specific user's activity
+app.get('/api/user/:userId/activity', requireAuth, async (req, res) => {
+  const userId = Number(req.params.userId);
+
+  if (!userId) {
+    return res.status(400).json({ message: 'Invalid userId' });
+  }
+
   try {
-    const userId = Number(req.params.userId);
-    const userActivities = activities.get(userId) || [];
-    return res.json(userActivities);
+    const { rows } = await pool.query(
+      `SELECT a.*, u.username, u.email
+       FROM activities a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.user_id = $1
+       ORDER BY a.created_at DESC
+       LIMIT 100`,
+      [userId]
+    );
+
+    const feed = rows.map(mapActivityRowToPost);
+    return res.json(feed);
   } catch (error) {
     console.error('Error fetching user activity:', error);
     return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
 });
 
-// Get social feed (global activity)
-app.get('/api/feed/social', requireAuth, (req, res) => {
+// Get social feed (global activity: friends+public visibility)
+app.get('/api/feed/social', requireAuth, async (req, res) => {
   try {
-    const globalActivity = activities.get('global') || [];
-    return res.json(globalActivity);
+    const { rows } = await pool.query(
+      `SELECT a.*, u.username, u.email
+       FROM activities a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.visibility = 'public' OR a.visibility = 'friends'
+       ORDER BY a.created_at DESC
+       LIMIT 100`
+    );
+
+    const feed = rows.map(mapActivityRowToPost);
+    return res.json(feed);
   } catch (error) {
     console.error('Error fetching social feed:', error);
     return res.status(500).json({ message: 'Internal server error', error: error.message });
@@ -1581,49 +1659,37 @@ app.get('/api/messages/total-unread', requireAuth, async (req, res) => {
 });
 
 // ===== Post Interaction Endpoints =====
-// In-memory storage for post interactions
+// In-memory storage for post interactions (likes/comments) keyed by activity ID
 const postLikes = new Map(); // postId -> Set of userIds who liked it
 const postComments = new Map(); // postId -> Array of comments
 const commentLikes = new Map(); // commentId -> Set of userIds who liked it
 
-// Like/Unlike a post
+// Like/Unlike a post (activity row)
 app.post('/api/posts/:postId/like', requireAuth, (req, res) => {
   try {
-    const postId = req.params.postId;
+    const postId = String(req.params.postId);
     const userId = req.userId;
-    
+
     if (!postLikes.has(postId)) {
       postLikes.set(postId, new Set());
     }
-    
+
     const likes = postLikes.get(postId);
     const isLiked = likes.has(userId);
-    
+
     if (isLiked) {
       likes.delete(userId);
     } else {
       likes.add(userId);
     }
-    
-    // Update the post in activities to include like count and reactions array
-    const updatePostInActivities = (activityMap, postId, likeCount, likesArray) => {
-      for (const [key, activities] of activityMap.entries()) {
-        const postIndex = activities.findIndex(a => a.id === postId);
-        if (postIndex >= 0) {
-          activities[postIndex].reactions = likesArray;
-          activities[postIndex].likeCount = likeCount;
-        }
-      }
-    };
-    
+
     const likesArray = Array.from(likes);
-    updatePostInActivities(activities, postId, likes.size, likesArray);
-    
-    return res.json({ 
-      success: true, 
+
+    return res.json({
+      success: true,
       liked: !isLiked,
       likeCount: likes.size,
-      reactions: likesArray
+      reactions: likesArray,
     });
   } catch (error) {
     console.error('Error toggling like:', error);
@@ -1634,20 +1700,20 @@ app.post('/api/posts/:postId/like', requireAuth, (req, res) => {
 // Get post comments
 app.get('/api/posts/:postId/comments', requireAuth, (req, res) => {
   try {
-    const postId = req.params.postId;
+    const postId = String(req.params.postId);
     const comments = postComments.get(postId) || [];
     const sort = req.query.sort || 'newest';
-    
+
     // Enrich comments with current like status for requesting user
     const enrichedComments = comments.map(comment => {
       const likes = commentLikes.get(comment.id) || new Set();
       return {
         ...comment,
         likeCount: likes.size,
-        liked: likes.has(req.userId)
+        liked: likes.has(req.userId),
       };
     });
-    
+
     let sortedComments = [...enrichedComments];
     if (sort === 'top') {
       // Sort by like count (descending), then by creation date (newest first)
@@ -1661,7 +1727,7 @@ app.get('/api/posts/:postId/comments', requireAuth, (req, res) => {
       // Sort by creation date (newest first)
       sortedComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     }
-    
+
     return res.json(sortedComments);
   } catch (error) {
     console.error('Error fetching comments:', error);
@@ -1669,16 +1735,16 @@ app.get('/api/posts/:postId/comments', requireAuth, (req, res) => {
   }
 });
 
-// Add comment to post
+// Add comment to post (in-memory, keyed by activity ID)
 app.post('/api/posts/:postId/comments', requireAuth, (req, res) => {
   try {
-    const postId = req.params.postId;
+    const postId = String(req.params.postId);
     const { text } = req.body || {};
-    
+
     if (!text || !text.trim()) {
       return res.status(400).json({ message: 'Comment text is required' });
     }
-    
+
     const user = getUserById(req.userId);
     const comment = {
       id: `comment-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -1688,33 +1754,20 @@ app.post('/api/posts/:postId/comments', requireAuth, (req, res) => {
       text: text.trim(),
       createdAt: new Date().toISOString(),
       likeCount: 0,
-      liked: false
+      liked: false,
     };
-    
+
     if (!postComments.has(postId)) {
       postComments.set(postId, []);
     }
-    
+
     const comments = postComments.get(postId);
     comments.push(comment);
-    
-    // Update the post in activities to include comment count
-    const updatePostInActivities = (activityMap, postId, commentCount) => {
-      for (const [key, activities] of activityMap.entries()) {
-        const postIndex = activities.findIndex(a => a.id === postId);
-        if (postIndex >= 0) {
-          activities[postIndex].comments = commentCount;
-          activities[postIndex].commentCount = commentCount;
-        }
-      }
-    };
-    
-    updatePostInActivities(activities, postId, comments.length);
-    
-    return res.json({ 
-      success: true, 
+
+    return res.json({
+      success: true,
       comment,
-      commentCount: comments.length
+      commentCount: comments.length,
     });
   } catch (error) {
     console.error('Error adding comment:', error);
@@ -1722,38 +1775,38 @@ app.post('/api/posts/:postId/comments', requireAuth, (req, res) => {
   }
 });
 
-// Like/Unlike a comment
+// Like/Unlike a comment (in-memory only)
 app.post('/api/posts/:postId/comments/:commentId/like', requireAuth, (req, res) => {
   try {
     const { postId, commentId } = req.params;
     const userId = req.userId;
-    
+
     // Initialize comment likes storage if needed
     if (!commentLikes.has(commentId)) {
       commentLikes.set(commentId, new Set());
     }
-    
+
     const likes = commentLikes.get(commentId);
     const isLiked = likes.has(userId);
-    
+
     if (isLiked) {
       likes.delete(userId);
     } else {
       likes.add(userId);
     }
-    
+
     // Update the comment in postComments to include like count
     const comments = postComments.get(postId) || [];
-    const commentIndex = comments.findIndex(c => c.id === commentId);
+    const commentIndex = comments.findIndex((c) => c.id === commentId);
     if (commentIndex >= 0) {
       comments[commentIndex].likeCount = likes.size;
       comments[commentIndex].liked = !isLiked;
     }
-    
-    return res.json({ 
-      success: true, 
+
+    return res.json({
+      success: true,
       liked: !isLiked,
-      likeCount: likes.size
+      likeCount: likes.size,
     });
   } catch (error) {
     console.error('Error toggling comment like:', error);
@@ -1761,17 +1814,50 @@ app.post('/api/posts/:postId/comments/:commentId/like', requireAuth, (req, res) 
   }
 });
 
-// Get post like status and count
+// Like/Unlike a post (activity row)
+app.post('/api/posts/:postId/like', requireAuth, (req, res) => {
+  try {
+    const postId = String(req.params.postId);
+    const userId = req.userId;
+
+    if (!postLikes.has(postId)) {
+      postLikes.set(postId, new Set());
+    }
+
+    const likes = postLikes.get(postId);
+    const isLiked = likes.has(userId);
+
+    if (isLiked) {
+      likes.delete(userId);
+    } else {
+      likes.add(userId);
+    }
+
+    const likesArray = Array.from(likes);
+
+    return res.json({
+      success: true,
+      liked: !isLiked,
+      likeCount: likes.size,
+      reactions: likesArray,
+    });
+  } catch (error) {
+    console.error('Error toggling like:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Get post like status and count (from in-memory likes map)
 app.get('/api/posts/:postId/likes', requireAuth, (req, res) => {
   try {
-    const postId = req.params.postId;
+    const postId = String(req.params.postId);
     const likes = postLikes.get(postId) || new Set();
     const isLiked = likes.has(req.userId);
-    
+
     return res.json({
       liked: isLiked,
       likeCount: likes.size,
-      likedBy: Array.from(likes)
+      likedBy: Array.from(likes),
     });
   } catch (error) {
     console.error('Error fetching likes:', error);

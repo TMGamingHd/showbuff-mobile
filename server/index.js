@@ -1199,6 +1199,9 @@ function mapActivityRowToPost(row) {
     userId: row.user_id,
     userName: row.username || row.user_name || row.email || 'User',
     content: row.comment,
+    // Expose review metadata so Profile activity can render rating stars and text
+    rating: row.rating,
+    comment: row.comment,
     visibility: row.visibility || 'friends',
     movie,
     movieId,

@@ -34,6 +34,9 @@ const MovieDetailScreen = ({ route, navigation }) => {
   const [rating, setRating] = useState(0);
   const [reviewComment, setReviewComment] = useState('');
 
+	const isTv = movie.media_type === 'tv' || movie.type === 'tv';
+	const displayTitle = isTv ? (movie.name || movie.title) : (movie.title || movie.name);
+
   useEffect(() => {
     loadMovieDetails();
   }, []);
@@ -210,7 +213,7 @@ const MovieDetailScreen = ({ route, navigation }) => {
             resizeMode="cover"
           />
           <View style={styles.basicInfo}>
-            <Text style={styles.title}>{movie.title || movie.name}</Text>
+            <Text style={styles.title}>{displayTitle}</Text>
             <Text style={styles.year}>
               {TMDBService.getYear(movie.release_date || movie.first_air_date)}
             </Text>

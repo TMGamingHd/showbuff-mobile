@@ -58,6 +58,9 @@ export const AppProvider = ({ children }) => {
       movieId: movie?.id,
       movieTitle: movie?.title || movie?.name,
       moviePoster: movie?.poster_path,
+      // Preserve whether this is a movie or TV show so Activity can navigate correctly
+      media_type: movie?.media_type || movie?.type,
+      movie: movie || null,
       userId: user?.id,
       createdAt: new Date().toISOString(),
       ...additionalData
@@ -515,53 +518,54 @@ export const AppProvider = ({ children }) => {
            !movie.release_date ||
            !movie.genre_ids;
   };
-
   // Refresh incomplete movie data by fetching from TMDB
   const refreshIncompleteMovieData = async (watchlistMovies, currentlyWatchingMovies, watchedMovies) => {
     try {
       const allMovies = [...watchlistMovies, ...currentlyWatchingMovies, ...watchedMovies];
       const incompleteMovies = allMovies.filter(isMovieIncomplete);
-      
+
       if (incompleteMovies.length === 0) {
-        console.log('All movies have complete data, no refresh needed');
+        console.log('All movies/shows have complete data, no refresh needed');
         return;
       }
 
-      // Fetch updated details for each incomplete item, respecting movie vs TV
       const movieUpdatePromises = incompleteMovies.map(async (movie) => {
         try {
           const isTv = movie.media_type === 'tv' || movie.type === 'tv';
-          console.log(`Fetching details for ${isTv ? 'TV show' : 'movie'} ID: ${movie.id}`);
-          const tmdbDetails = isTv
-            ? await TMDBService.getTVDetails(movie.id)
-            : await TMDBService.getMovieDetails(movie.id);
+
+          // Do not re-enrich TV shows on the client; trust backend/importer data.
+          if (isTv) {
+            return movie;
+          }
+
+          console.log(`Fetching details for movie ID: ${movie.id}`);
+          const tmdbDetails = await TMDBService.getMovieDetails(movie.id);
 
           // If TMDB could not return a real title, avoid overwriting with junk/demo data
           const hasRealTitle = Boolean(tmdbDetails && (tmdbDetails.title || tmdbDetails.name));
           if (!hasRealTitle) {
             return movie;
           }
-          
+
           return {
             ...movie,
             title: tmdbDetails.title || movie.title,
-            name: tmdbDetails.name || tmdbDetails.title || movie.name,
+            name: tmdbDetails.title || tmdbDetails.name || movie.name,
             overview: tmdbDetails.overview || movie.overview,
             poster_path: tmdbDetails.poster_path || movie.poster_path,
             backdrop_path: tmdbDetails.backdrop_path || movie.backdrop_path,
             vote_average: tmdbDetails.vote_average || movie.vote_average,
             vote_count: tmdbDetails.vote_count || movie.vote_count,
             release_date: tmdbDetails.release_date || movie.release_date,
-            first_air_date: tmdbDetails.first_air_date || movie.first_air_date,
             genre_ids: tmdbDetails.genre_ids || movie.genre_ids,
             genres: tmdbDetails.genres || movie.genres,
             runtime: tmdbDetails.runtime || movie.runtime,
             popularity: tmdbDetails.popularity || movie.popularity,
             adult: tmdbDetails.adult !== undefined ? tmdbDetails.adult : movie.adult,
             original_language: tmdbDetails.original_language || movie.original_language,
-            original_title: tmdbDetails.original_title || tmdbDetails.original_name || movie.original_title,
-            media_type: movie.media_type || (isTv ? 'tv' : 'movie'),
-            type: movie.type || (isTv ? 'tv' : 'movie'),
+            original_title: tmdbDetails.original_title || movie.original_title,
+            media_type: movie.media_type || 'movie',
+            type: movie.type || 'movie',
           };
         } catch (error) {
           console.error(`Failed to fetch details for item ${movie.id}:`, error);
@@ -571,27 +575,27 @@ export const AppProvider = ({ children }) => {
 
       const updatedMovies = await Promise.all(movieUpdatePromises);
       console.log(`Successfully refreshed ${updatedMovies.length} movies/shows`);
-      
+
       // Create lookup map of updated movies
       const updatedMoviesMap = new Map(updatedMovies.map((movie) => [movie.id, movie]));
-      
+
       // Update each list with refreshed movie data
       const updateMovieList = (movieList) => {
         return movieList.map((movie) => updatedMoviesMap.get(movie.id) || movie);
       };
-      
+
       const refreshedWatchlist = updateMovieList(watchlistMovies);
       const refreshedCurrentlyWatching = updateMovieList(currentlyWatchingMovies);
       const refreshedWatched = updateMovieList(watchedMovies);
-      
+
       // Update state with refreshed data
       setWatchlist(refreshedWatchlist);
       setCurrentlyWatching(refreshedCurrentlyWatching);
       setWatched(refreshedWatched);
-      
+
       // Cache the updated data
       await cacheUserData();
-      
+
       console.log('Movie data refresh completed successfully');
     } catch (error) {
       console.error('Error refreshing incomplete movie data:', error);

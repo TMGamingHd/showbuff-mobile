@@ -330,9 +330,23 @@ class BackendService {
     // Normalize list type to backend format (hyphenated)
     const normalizedList = String(listType).replace(/_/g, '-');
 
+    // Pass along essential TMDB fields so the backend can persist media_type (movie vs tv)
+    const payloadMovieData = movieData
+      ? {
+          id: movieData.id,
+          title: movieData.title || movieData.name,
+          name: movieData.name || movieData.title,
+          poster_path: movieData.poster_path,
+          release_date: movieData.release_date || movieData.first_air_date,
+          first_air_date: movieData.first_air_date || movieData.release_date,
+          media_type: movieData.media_type || movieData.type,
+        }
+      : null;
+
     const requestBody = {
       movieId: movieData.id,
-      listType: normalizedList
+      listType: normalizedList,
+      movieData: payloadMovieData,
     };
     
     console.log('Sending add-to-list request:', requestBody);
@@ -897,20 +911,16 @@ class BackendService {
     }
   }
 
-  async fetchMovieFromTMDB(movieId) {
+  async fetchMovieFromTMDB(movieId, mediaTypeHint) {
     try {
-      const url = `${this.tmdbBaseUrl}/movie/${movieId}?api_key=${this.tmdbApiKey}`;
-      const response = await fetch(url, { timeout: this.timeout });
-      
-      if (!response.ok) {
-        // Try TV show if movie fails
+      const hint = (mediaTypeHint || '').toLowerCase();
+      const tryTvFirst = hint === 'tv';
+
+      const fetchTv = async () => {
         const tvUrl = `${this.tmdbBaseUrl}/tv/${movieId}?api_key=${this.tmdbApiKey}`;
         const tvResponse = await fetch(tvUrl, { timeout: this.timeout });
-        
-        if (!tvResponse.ok) {
-          throw new Error(`TMDB API error: ${response.status}`);
-        }
-        
+        if (!tvResponse.ok) return null;
+
         const tvData = await tvResponse.json();
         return {
           id: movieId,
@@ -929,30 +939,58 @@ class BackendService {
           adult: tvData.adult,
           original_language: tvData.original_language,
           original_name: tvData.original_name,
-          type: 'tv'
+          media_type: 'tv',
+          type: 'tv',
         };
-      }
-      
-      const movieData = await response.json();
-      return {
-        id: movieId,
-        title: movieData.title,
-        name: movieData.title,
-        poster_path: movieData.poster_path,
-        backdrop_path: movieData.backdrop_path,
-        overview: movieData.overview,
-        vote_average: movieData.vote_average,
-        vote_count: movieData.vote_count,
-        release_date: movieData.release_date,
-        genre_ids: movieData.genre_ids,
-        genres: movieData.genres,
-        runtime: movieData.runtime,
-        popularity: movieData.popularity,
-        adult: movieData.adult,
-        original_language: movieData.original_language,
-        original_title: movieData.original_title,
-        type: 'movie'
       };
+
+      const fetchMovie = async () => {
+        const url = `${this.tmdbBaseUrl}/movie/${movieId}?api_key=${this.tmdbApiKey}`;
+        const response = await fetch(url, { timeout: this.timeout });
+        if (!response.ok) return null;
+
+        const movieData = await response.json();
+        return {
+          id: movieId,
+          title: movieData.title,
+          name: movieData.title,
+          poster_path: movieData.poster_path,
+          backdrop_path: movieData.backdrop_path,
+          overview: movieData.overview,
+          vote_average: movieData.vote_average,
+          vote_count: movieData.vote_count,
+          release_date: movieData.release_date,
+          genre_ids: movieData.genre_ids,
+          genres: movieData.genres,
+          runtime: movieData.runtime,
+          popularity: movieData.popularity,
+          adult: movieData.adult,
+          original_language: movieData.original_language,
+          original_title: movieData.original_title,
+          media_type: 'movie',
+          type: 'movie',
+        };
+      };
+
+      let result = null;
+
+      if (tryTvFirst) {
+        result = await fetchTv();
+        if (!result) {
+          result = await fetchMovie();
+        }
+      } else {
+        result = await fetchMovie();
+        if (!result) {
+          result = await fetchTv();
+        }
+      }
+
+      if (!result) {
+        throw new Error(`TMDB API error for id ${movieId}`);
+      }
+
+      return result;
     } catch (error) {
       console.warn(`Failed to fetch movie ${movieId} from TMDB:`, error);
       return null;
@@ -961,19 +999,19 @@ class BackendService {
 
   async enrichMovieData(movieData) {
     if (!movieData) return null;
-    
+
     const movieId = movieData.id || movieData.movieId || movieData.tmdb_id || movieData.tmdbId;
     const title = movieData.title || movieData.movieTitle || movieData.name || movieData.movie_title;
-    
+    const mediaTypeHint = (movieData.media_type || movieData.type || '').toLowerCase();
+
     // Only enrich if we have a valid movieId AND the title is clearly generic/incomplete
     // Be much more conservative - don't overwrite existing valid titles
     const isClearlyGeneric = title && (
-      title.match(/^Show #\d+$/) || 
-      title === 'Unknown Movie' || 
+      title.match(/^Show #\d+$/) ||
+      title === 'Unknown Movie' ||
       title === 'Unknown' ||
       !title.trim()
     );
-    
     if (isClearlyGeneric && movieId) {
       // Check cache first
       const cacheKey = `movie_${movieId}`;
@@ -984,71 +1022,98 @@ class BackendService {
           return { ...movieData, ...cached };
         }
       }
-      
+
       // Only fetch from TMDB if we don't have a valid title in cache
-      const tmdbData = await this.fetchMovieFromTMDB(movieId);
-      if (tmdbData && tmdbData.title) {
+      const tmdbData = await this.fetchMovieFromTMDB(movieId, mediaTypeHint);
+      if (tmdbData && (tmdbData.title || tmdbData.name)) {
         this.movieCache.set(cacheKey, tmdbData);
         await this.saveMovieCache();
         return { ...movieData, ...tmdbData };
       }
     }
-    
+
     // Return original data unchanged if we don't need to enrich
     return movieData;
   }
 
   async enrichActivityData(activities) {
     if (!Array.isArray(activities)) return activities;
-    
+
     const enriched = await Promise.all(
       activities.map(async (activity) => {
         if (!activity) return activity;
-        
+
         // Handle nested movie object in posts
         const movieObj = activity.movie;
         const movieId = activity.movieId || movieObj?.id || movieObj?.tmdbId;
         const movieTitle = activity.movieTitle || movieObj?.title || movieObj?.name;
         const moviePoster = activity.moviePoster || movieObj?.poster_path;
-        
-        // Only enrich if we have a movieId AND the title looks incomplete
-        // Don't overwrite existing good data
+        const isListActivity = String(activity.type || '').toLowerCase() === 'list';
+        const rawMediaType = activity.media_type || movieObj?.media_type || movieObj?.type;
+        const isTv = String(rawMediaType || '').toLowerCase() === 'tv';
+
+        // SPECIAL CASE: list activities for TV shows may have been stored
+        // with incorrect movie titles/posters. For these, force-refresh
+        // from TMDB using the TV endpoint and allow overriding titles.
+        if (isListActivity && isTv && movieId) {
+          const tvData = await this.fetchMovieFromTMDB(movieId, 'tv');
+          if (tvData && (tvData.name || tvData.title)) {
+            const tvTitle = tvData.name || tvData.title;
+            return {
+              ...activity,
+              media_type: 'tv',
+              movieId: tvData.id,
+              movieTitle: tvTitle,
+              moviePoster: tvData.poster_path || moviePoster,
+              movie: {
+                ...(movieObj || {}),
+                ...tvData,
+                media_type: 'tv',
+                type: tvData.type || 'tv',
+              },
+            };
+          }
+        }
+
+        // Generic enrichment for other cases: only when title is clearly generic
         const needsEnrichment = movieId && (
-          !movieTitle || 
+          !movieTitle ||
           movieTitle === 'Unknown Movie' ||
           movieTitle.match(/^Show #\d+$/)
         );
-        
+
         if (needsEnrichment) {
           const enrichedMovie = await this.enrichMovieData({
             id: movieId,
             title: movieTitle,
             poster_path: moviePoster,
-            ...movieObj
+            media_type: rawMediaType,
+            type: rawMediaType,
+            ...movieObj,
           });
-          
-          if (enrichedMovie && enrichedMovie.title !== movieTitle) {
+
+          if (enrichedMovie && (enrichedMovie.title || enrichedMovie.name)) {
             return {
               ...activity,
               movieId: enrichedMovie.id,
               movieTitle: enrichedMovie.title || enrichedMovie.name,
               moviePoster: enrichedMovie.poster_path,
               // Update nested movie object too
-              movie: enrichedMovie
+              movie: enrichedMovie,
             };
           }
         }
-        
+
         return activity;
       })
     );
-    
+
     return enriched;
   }
 
   async enrichMovieList(movies) {
     if (!Array.isArray(movies)) return movies;
-    
+
     const enriched = await Promise.all(
       movies.map(async (movie) => {
         // Always try to enrich with latest TMDB data for complete movie info
@@ -1056,33 +1121,34 @@ class BackendService {
         if (movieId) {
           // Check if movie needs enrichment (missing key fields like ratings)
           const needsEnrichment = !movie.vote_average || !movie.overview || !movie.poster_path;
-          
+
           if (needsEnrichment) {
             const cacheKey = `movie_${movieId}`;
             let enrichedData = null;
-            
+
             // Check cache first
             if (this.movieCache.has(cacheKey)) {
               enrichedData = this.movieCache.get(cacheKey);
             } else {
-              // Fetch from TMDB
-              enrichedData = await this.fetchMovieFromTMDB(movieId);
+              // Fetch from TMDB, using media_type/type hint if present
+              const mediaTypeHint = (movie.media_type || movie.type || '').toLowerCase();
+              enrichedData = await this.fetchMovieFromTMDB(movieId, mediaTypeHint);
               if (enrichedData) {
                 this.movieCache.set(cacheKey, enrichedData);
                 await this.saveMovieCache();
               }
             }
-            
+
             if (enrichedData) {
               return { ...movie, ...enrichedData };
             }
           }
         }
-        
+
         return movie;
       })
     );
-    
+
     return enriched;
   }
 }

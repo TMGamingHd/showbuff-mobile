@@ -98,6 +98,14 @@ async function addShowToListDb(userId, listType, movieId, movieData) {
   const releaseDate = movieData?.release_date || null;
   const firstAirDate = movieData?.first_air_date || null;
 
+  // Always keep a single row per (user_list_id, tmdb_id). If the user re-adds
+  // a show with a different media_type (e.g., fixing a TV vs movie mixup),
+  // replace the old row so downstream code sees the correct identity.
+  await pool.query(
+    'DELETE FROM list_items WHERE user_list_id = $1 AND tmdb_id = $2',
+    [listId, tmdbId]
+  );
+
   await pool.query(
     `INSERT INTO list_items (user_list_id, tmdb_id, media_type, title, poster_path, release_date, first_air_date)
      VALUES ($1, $2, $3, $4, $5, $6, $7)

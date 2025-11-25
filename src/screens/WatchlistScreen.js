@@ -186,6 +186,8 @@ const WatchlistScreen = ({ navigation, route }) => {
   const renderMovieItem = ({ item }) => {
     const userReview = getUserReview(item.id);
     const year = item.release_date ? new Date(item.release_date).getFullYear() : '';
+		const isTv = item.media_type === 'tv' || item.type === 'tv';
+		const displayTitle = isTv ? (item.name || item.title) : (item.title || item.name);
 
     return (
       <TouchableOpacity 
@@ -213,7 +215,7 @@ const WatchlistScreen = ({ navigation, route }) => {
           </View>
         )}
         
-        <Text style={styles.movieTitle} numberOfLines={2}>{item.title || item.name}</Text>
+        <Text style={styles.movieTitle} numberOfLines={2}>{displayTitle}</Text>
         
         {/* User's Review Preview */}
         {userReview && userReview.comment && (

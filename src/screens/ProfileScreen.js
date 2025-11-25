@@ -231,48 +231,53 @@ const ProfileScreen = ({ navigation }) => {
   };
 
   const getActivityText = (activityItem) => {
+		const baseTitle =
+			activityItem.movie?.title ||
+			activityItem.movie?.name ||
+			activityItem.movieTitle;
+
     if (activityItem.type === 'list') {
       switch (activityItem.action) {
         case 'added_to_watchlist':
-          return `Added "${activityItem.movieTitle}" to watchlist`;
+          return `Added "${baseTitle}" to watchlist`;
         case 'moved_to_watchlist':
-          return `Moved "${activityItem.movieTitle}" to watchlist`;
+          return `Moved "${baseTitle}" to watchlist`;
         case 'added_to_currentlywatching':
-          return `Started watching "${activityItem.movieTitle}"`;
+          return `Started watching "${baseTitle}"`;
         case 'moved_to_currentlywatching':
-          return `Moved "${activityItem.movieTitle}" to currently watching`;
+          return `Moved "${baseTitle}" to currently watching`;
         case 'added_to_watched':
-          return `Finished watching "${activityItem.movieTitle}"`;
+          return `Finished watching "${baseTitle}"`;
         case 'moved_to_watched':
-          return `Moved "${activityItem.movieTitle}" to watched`;
+          return `Moved "${baseTitle}" to watched`;
         case 'removed_from_watchlist':
-          return `Removed "${activityItem.movieTitle}" from watchlist`;
+          return `Removed "${baseTitle}" from watchlist`;
         case 'removed_from_currentlywatching':
-          return `Removed "${activityItem.movieTitle}" from currently watching`;
+          return `Removed "${baseTitle}" from currently watching`;
         case 'removed_from_watched':
-          return `Removed "${activityItem.movieTitle}" from watched`;
+          return `Removed "${baseTitle}" from watched`;
         default:
-          return `Updated "${activityItem.movieTitle}" in your lists`;
+          return `Updated "${baseTitle || 'a title'}" in your lists`;
       }
     }
     
     switch (activityItem.type) {
       case 'review':
-        return `Reviewed "${activityItem.movieTitle}" with ${activityItem.rating}/10 stars`;
+        return `Reviewed "${baseTitle}" with ${activityItem.rating}/10 stars`;
       case 'post':
       case 'movie_post':
       case 'text_post':
         // For movie posts, show a specific label with the movie title
-        if (activityItem.movieTitle || activityItem.movieId || activityItem.moviePoster) {
-          const title = activityItem.movieTitle || 'a movie';
+        if (baseTitle || activityItem.movieId || activityItem.moviePoster) {
+          const title = baseTitle || 'a movie';
           return `You made a post about "${title}"`;
         }
         // Fallback for non-movie posts
         return 'You made a post';
       case 'movie_share':
-        return `Shared "${activityItem.movieTitle}" with a friend`;
+        return `Shared "${baseTitle}" with a friend`;
       default:
-        return `Performed an action on "${activityItem.movieTitle || 'a movie'}"`;
+        return `Performed an action on "${baseTitle || 'a movie'}"`;
     }
   };
 
@@ -423,22 +428,42 @@ const ProfileScreen = ({ navigation }) => {
     }));
   };
   
-  const renderActivityItem = ({ item: activityItem }) => (
-    <View style={styles.activityItem}>
-      <View style={[
-        styles.activityIcon,
-        { backgroundColor: getActivityColor(activityItem.type, activityItem.action) }
-      ]}>
-        <Ionicons 
-          name={getActivityIcon(activityItem.type, activityItem.action)} 
-          size={16} 
-          color="#FFFFFF" 
-        />
-      </View>
+  const renderActivityItem = ({ item: activityItem }) => {
+    const activityMovie =
+      activityItem.movie && activityItem.movie.id
+        ? activityItem.movie
+        : activityItem.movieId
+        ? {
+            id: activityItem.movieId,
+            title: activityItem.movieTitle,
+            name: activityItem.movieTitle,
+            poster_path: activityItem.moviePoster,
+            media_type: activityItem.media_type || (activityItem.movie && activityItem.movie.media_type) || 'movie',
+          }
+        : null;
+
+    return (
+      <View style={styles.activityItem}>
+        <View style={[
+          styles.activityIcon,
+          { backgroundColor: getActivityColor(activityItem.type, activityItem.action) }
+        ]}>
+          <Ionicons 
+            name={getActivityIcon(activityItem.type, activityItem.action)} 
+            size={16} 
+            color="#FFFFFF" 
+          />
+        </View>
       
       <View style={styles.activityContent}>
         <Text style={styles.activityText}>
-          {getActivityText(activityItem)}
+          {getActivityText({
+            ...activityItem,
+            movie: activityMovie,
+            movieTitle:
+              (activityMovie && (activityMovie.title || activityMovie.name)) ||
+              activityItem.movieTitle,
+          })}
         </Text>
         <Text style={styles.activityTime}>
           {formatActivityTime(activityItem.createdAt)}
@@ -451,25 +476,23 @@ const ProfileScreen = ({ navigation }) => {
         )}
       </View>
       
-      {activityItem.moviePoster && (
+      {activityMovie && activityMovie.poster_path && (
         <TouchableOpacity
-          onPress={() => navigation.navigate('MovieDetail', { 
-            movie: { 
-              id: activityItem.movieId, 
-              title: activityItem.movieTitle,
-              poster_path: activityItem.moviePoster 
-            } 
-          })}
+          onPress={() =>
+					activityMovie &&
+					navigation.navigate('MovieDetail', { movie: activityMovie })
+				}
         >
           <Image
-            source={{ uri: TMDBService.getImageUrl(activityItem.moviePoster, 'w185') }}
+            source={{ uri: TMDBService.getImageUrl(activityMovie.poster_path, 'w185') }}
             style={styles.activityMoviePoster}
             resizeMode="cover"
           />
         </TouchableOpacity>
       )}
     </View>
-  );
+	);
+  };
   
   const renderActivityHeader = ({ section }) => (
     <View style={styles.activityDateHeader}>

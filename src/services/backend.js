@@ -892,7 +892,7 @@ class BackendService {
   // ===== Movie Data Enrichment =====
   async loadMovieCache() {
     try {
-      const cached = await AsyncStorage.getItem('movieCache');
+      const cached = await AsyncStorage.getItem('movieCache_v2');
       if (cached) {
         const data = JSON.parse(cached);
         this.movieCache = new Map(Object.entries(data));
@@ -905,7 +905,7 @@ class BackendService {
   async saveMovieCache() {
     try {
       const data = Object.fromEntries(this.movieCache);
-      await AsyncStorage.setItem('movieCache', JSON.stringify(data));
+      await AsyncStorage.setItem('movieCache_v2', JSON.stringify(data));
     } catch (error) {
       console.warn('Failed to save movie cache:', error);
     }
@@ -1013,8 +1013,8 @@ class BackendService {
       !title.trim()
     );
     if (isClearlyGeneric && movieId) {
-      // Check cache first
-      const cacheKey = `movie_${movieId}`;
+      // Check cache first, namespaced by media type so TV and movie IDs don't collide
+      const cacheKey = `movie_${mediaTypeHint || 'unknown'}_${movieId}`;
       if (this.movieCache.has(cacheKey)) {
         const cached = this.movieCache.get(cacheKey);
         // Only use cached data if it has a better title
@@ -1123,7 +1123,10 @@ class BackendService {
           const needsEnrichment = !movie.vote_average || !movie.overview || !movie.poster_path;
 
           if (needsEnrichment) {
-            const cacheKey = `movie_${movieId}`;
+            const mediaTypeHint = (movie.media_type || movie.type || '').toLowerCase();
+            // Namespace cache key by media type so TV and movie entries don't
+            // overwrite each other when they share the same numeric TMDB id.
+            const cacheKey = `movie_${mediaTypeHint || 'unknown'}_${movieId}`;
             let enrichedData = null;
 
             // Check cache first
@@ -1131,7 +1134,6 @@ class BackendService {
               enrichedData = this.movieCache.get(cacheKey);
             } else {
               // Fetch from TMDB, using media_type/type hint if present
-              const mediaTypeHint = (movie.media_type || movie.type || '').toLowerCase();
               enrichedData = await this.fetchMovieFromTMDB(movieId, mediaTypeHint);
               if (enrichedData) {
                 this.movieCache.set(cacheKey, enrichedData);

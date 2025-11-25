@@ -822,171 +822,429 @@ app.get('/api/movie/:showId/reviews', requireAuth, async (req, res) => {
 });
 
 // ===== Friends =====
-app.get('/api/friends', requireAuth, (req, res) => {
-  const userFriends = friends.get(req.userId) || [];
-  console.log(`[${new Date().toISOString()}] GET /api/friends for user ${req.userId}`);
-  console.log('Current friends:', userFriends);
-  console.log('All users in system:', users);
-  console.log('All friends data:', Array.from(friends.entries()));
-  res.json(userFriends);
+app.get('/api/friends', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.username
+       FROM friends f
+       JOIN users u ON u.id = f.friend_user_id
+       WHERE f.user_id = $1
+       ORDER BY u.username`,
+      [req.userId]
+    );
+
+    const userFriends = rows.map((row) => ({ id: row.id, username: row.username }));
+
+    // Keep in-memory friends map in sync for compatibility with messaging
+    friends.set(req.userId, userFriends);
+
+    console.log(`[${new Date().toISOString()}] GET /api/friends for user ${req.userId}`);
+    console.log('Current friends (from DB):', userFriends);
+
+    res.json(userFriends);
+  } catch (err) {
+    console.error('Error fetching friends:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-app.get('/api/friends/requests', requireAuth, (req, res) => {
-  res.json(friendRequests.get(req.userId) || []);
+app.get('/api/friends/requests', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT fr.id, fr.from_user_id, fr.to_user_id, fr.created_at,
+              u.username AS sender_username, u.email AS sender_email
+       FROM friend_requests fr
+       JOIN users u ON u.id = fr.from_user_id
+       WHERE fr.to_user_id = $1 AND fr.status = 'pending'
+       ORDER BY fr.created_at DESC`,
+      [req.userId]
+    );
+
+    const requests = rows.map((row) => ({
+      id: String(row.id),
+      fromUserId: row.from_user_id,
+      toUserId: row.to_user_id,
+      senderUsername: row.sender_username,
+      senderEmail: row.sender_email,
+      createdAt: row.created_at,
+    }));
+
+    // Sync in-memory friendRequests map for unread counts compatibility
+    friendRequests.set(req.userId, requests);
+
+    res.json(requests);
+  } catch (err) {
+    console.error('Error fetching friend requests:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-app.post('/api/friends/request', requireAuth, (req, res) => {
+app.post('/api/friends/request', requireAuth, async (req, res) => {
   const { userId } = req.body || {};
   if (!userId) return res.status(400).json({ message: 'userId required' });
   const to = Number(userId);
-  
-  // Prevent self friend requests
-  if (req.userId === to) {
-    return res.status(400).json({ message: 'Cannot send friend request to yourself' });
+
+  try {
+    // Prevent self friend requests
+    if (req.userId === to) {
+      return res.status(400).json({ message: 'Cannot send friend request to yourself' });
+    }
+
+    // Ensure target user exists
+    const target = await pool.query('SELECT id FROM users WHERE id = $1', [to]);
+    if (!target.rows.length) {
+      return res.status(404).json({ message: 'Target user not found' });
+    }
+
+    // Check if users are already friends
+    const alreadyFriends = await pool.query(
+      `SELECT 1 FROM friends
+       WHERE (user_id = $1 AND friend_user_id = $2)
+          OR (user_id = $2 AND friend_user_id = $1)
+       LIMIT 1`,
+      [req.userId, to]
+    );
+    if (alreadyFriends.rows.length > 0) {
+      return res.status(409).json({ message: 'Users are already friends' });
+    }
+
+    // Check for existing pending request (both directions)
+    const existing = await pool.query(
+      `SELECT fr.id, fr.from_user_id, fr.to_user_id, fr.created_at,
+              u.username AS sender_username, u.email AS sender_email
+       FROM friend_requests fr
+       JOIN users u ON u.id = fr.from_user_id
+       WHERE ((fr.from_user_id = $1 AND fr.to_user_id = $2)
+           OR (fr.from_user_id = $2 AND fr.to_user_id = $1))
+         AND fr.status = 'pending'
+       LIMIT 1`,
+      [req.userId, to]
+    );
+
+    if (existing.rows.length > 0) {
+      const row = existing.rows[0];
+      const existingRequest = {
+        id: String(row.id),
+        fromUserId: row.from_user_id,
+        toUserId: row.to_user_id,
+        senderUsername: row.sender_username,
+        senderEmail: row.sender_email,
+        createdAt: row.created_at,
+      };
+      return res.status(409).json({
+        message: 'Friend request already exists',
+        existingRequest,
+      });
+    }
+
+    // Create new request
+    const insert = await pool.query(
+      `INSERT INTO friend_requests (from_user_id, to_user_id, status)
+       VALUES ($1, $2, 'pending')
+       ON CONFLICT (from_user_id, to_user_id) DO UPDATE
+         SET status = 'pending', responded_at = NULL
+       RETURNING id, from_user_id, to_user_id, created_at`,
+      [req.userId, to]
+    );
+
+    const row = insert.rows[0];
+    const fromUser = getUserById(req.userId);
+
+    const fr = {
+      id: String(row.id),
+      fromUserId: row.from_user_id,
+      toUserId: row.to_user_id,
+      senderUsername: fromUser?.username || null,
+      senderEmail: fromUser?.email || null,
+      createdAt: row.created_at,
+    };
+
+    // Update in-memory friendRequests for the receiver
+    const existingReqs = friendRequests.get(to) || [];
+    existingReqs.unshift(fr);
+    friendRequests.set(to, existingReqs);
+
+    res.json({ success: true, request: fr });
+  } catch (err) {
+    console.error('Error creating friend request:', err);
+    return res.status(500).json({ message: 'Internal server error' });
   }
-  
-  const fromUser = getUserById(req.userId);
-  if (!fromUser) return res.status(404).json({ message: 'Sender user not found' });
-  
-  // Check if users are already friends
-  const userFriends = friends.get(req.userId) || [];
-  const isAlreadyFriend = userFriends.some(friend => friend.id === to);
-  if (isAlreadyFriend) {
-    return res.status(409).json({ message: 'Users are already friends' });
-  }
-  
-  // Check for existing pending request (both directions)
-  const reqs = friendRequests.get(to) || [];
-  const senderReqs = friendRequests.get(req.userId) || [];
-  
-  const existingRequest = reqs.find(r => r.fromUserId === req.userId) || 
-                         senderReqs.find(r => r.fromUserId === to);
-  
-  if (existingRequest) {
-    return res.status(409).json({ 
-      message: 'Friend request already exists',
-      existingRequest: existingRequest
-    });
-  }
-  
-  const fr = { 
-    id: `${to}-${Date.now()}`, 
-    fromUserId: req.userId, 
-    toUserId: to,
-    senderUsername: fromUser.username,
-    senderEmail: fromUser.email,
-    createdAt: new Date().toISOString()
-  };
-  reqs.push(fr);
-  friendRequests.set(to, reqs);
-  res.json({ success: true, request: fr });
 });
 
-app.post('/api/friends/accept/:requestId', requireAuth, (req, res) => {
-  const requestId = req.params.requestId;
-  const reqs = friendRequests.get(req.userId) || [];
-  const idx = reqs.findIndex(r => r.id === requestId);
-  if (idx < 0) return res.status(404).json({ message: 'Request not found' });
-  const r = reqs[idx];
-  reqs.splice(idx, 1);
-  friendRequests.set(req.userId, reqs);
-  // add to friends for both
-  const a = friends.get(req.userId) || [];
-  const b = friends.get(r.fromUserId) || [];
-  const fromUser = getUserById(r.fromUserId);
-  const me = getUserById(req.userId);
-  if (!a.find(f => Number(f.id) === Number(r.fromUserId))) a.push({ id: fromUser.id, username: fromUser.username });
-  if (!b.find(f => Number(f.id) === Number(req.userId))) b.push({ id: me.id, username: me.username });
-  friends.set(req.userId, a);
-  friends.set(r.fromUserId, b);
-  res.json({ success: true });
+app.post('/api/friends/accept/:requestId', requireAuth, async (req, res) => {
+  const requestId = Number(req.params.requestId);
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM friend_requests
+       WHERE id = $1 AND to_user_id = $2 AND status = 'pending'`,
+      [requestId, req.userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Request not found' });
+    }
+
+    const r = rows[0];
+    const fromId = r.from_user_id;
+
+    await pool.query(
+      `UPDATE friend_requests
+         SET status = 'accepted', responded_at = NOW()
+       WHERE id = $1`,
+      [requestId]
+    );
+
+    // Add to friends table for both directions
+    await pool.query(
+      `INSERT INTO friends (user_id, friend_user_id)
+       VALUES ($1, $2), ($2, $1)
+       ON CONFLICT (user_id, friend_user_id) DO NOTHING`,
+      [req.userId, fromId]
+    );
+
+    // Refresh in-memory friends lists for both users
+    const meFriendsRes = await pool.query(
+      `SELECT u.id, u.username
+       FROM friends f
+       JOIN users u ON u.id = f.friend_user_id
+       WHERE f.user_id = $1
+       ORDER BY u.username`,
+      [req.userId]
+    );
+    friends.set(
+      req.userId,
+      meFriendsRes.rows.map((row) => ({ id: row.id, username: row.username }))
+    );
+
+    const otherFriendsRes = await pool.query(
+      `SELECT u.id, u.username
+       FROM friends f
+       JOIN users u ON u.id = f.friend_user_id
+       WHERE f.user_id = $1
+       ORDER BY u.username`,
+      [fromId]
+    );
+    friends.set(
+      fromId,
+      otherFriendsRes.rows.map((row) => ({ id: row.id, username: row.username }))
+    );
+
+    // Remove from in-memory friendRequests for current user
+    const existingReqs = friendRequests.get(req.userId) || [];
+    friendRequests.set(
+      req.userId,
+      existingReqs.filter((fr) => String(fr.id) !== String(requestId))
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error accepting friend request:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-app.post('/api/friends/reject/:requestId', requireAuth, (req, res) => {
-  const requestId = req.params.requestId;
-  const reqs = friendRequests.get(req.userId) || [];
-  const idx = reqs.findIndex(r => r.id === requestId);
-  if (idx < 0) return res.status(404).json({ message: 'Request not found' });
-  reqs.splice(idx, 1);
-  friendRequests.set(req.userId, reqs);
-  res.json({ success: true });
+app.post('/api/friends/reject/:requestId', requireAuth, async (req, res) => {
+  const requestId = Number(req.params.requestId);
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM friend_requests
+       WHERE id = $1 AND to_user_id = $2 AND status = 'pending'`,
+      [requestId, req.userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Request not found' });
+    }
+
+    await pool.query(
+      `UPDATE friend_requests
+         SET status = 'rejected', responded_at = NOW()
+       WHERE id = $1`,
+      [requestId]
+    );
+
+    // Remove from in-memory friendRequests for current user
+    const existingReqs = friendRequests.get(req.userId) || [];
+    friendRequests.set(
+      req.userId,
+      existingReqs.filter((fr) => String(fr.id) !== String(requestId))
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error rejecting friend request:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // Get friend's profile data
-app.get('/api/friends/:friendId/profile', requireAuth, (req, res) => {
+app.get('/api/friends/:friendId/profile', requireAuth, async (req, res) => {
   const friendId = Number(req.params.friendId);
-  const userFriends = friends.get(req.userId) || [];
-  
-  console.log(`[${new Date().toISOString()}] GET /api/friends/${friendId}/profile`);
-  console.log('Requesting user ID:', req.userId);
-  console.log('Friend ID:', friendId);
-  
-  // Check if they are actually friends
-  const isFriend = userFriends.some(f => Number(f.id) === friendId);
-  if (!isFriend) {
-    console.log('Not authorized - not friends');
-    return res.status(403).json({ error: 'Not authorized to view this profile' });
+
+  try {
+    console.log(`[${new Date().toISOString()}] GET /api/friends/${friendId}/profile`);
+    console.log('Requesting user ID:', req.userId);
+    console.log('Friend ID:', friendId);
+
+    // Check if they are actually friends (one direction is enough)
+    const rel = await pool.query(
+      `SELECT 1 FROM friends WHERE user_id = $1 AND friend_user_id = $2 LIMIT 1`,
+      [req.userId, friendId]
+    );
+    if (!rel.rows.length) {
+      console.log('Not authorized - not friends');
+      return res.status(403).json({ error: 'Not authorized to view this profile' });
+    }
+
+    // Get friend's basic info
+    const userRes = await pool.query(
+      'SELECT id, username, email FROM users WHERE id = $1',
+      [friendId]
+    );
+    if (!userRes.rows.length) {
+      return res.status(404).json({ error: 'Friend not found' });
+    }
+    const friendUser = userRes.rows[0];
+
+    // Get friend's lists from Postgres
+    const [friendWatchlist, friendCurrentlyWatching, friendWatched] = await Promise.all([
+      getUserListItemsFromDb(friendId, 'watchlist'),
+      getUserListItemsFromDb(friendId, 'currently-watching'),
+      getUserListItemsFromDb(friendId, 'watched'),
+    ]);
+
+    // Get friend's reviews from Postgres
+    const reviewsRes = await pool.query(
+      'SELECT * FROM reviews WHERE user_id = $1 ORDER BY updated_at DESC',
+      [friendId]
+    );
+    const friendReviews = reviewsRes.rows.map((row) => ({
+      id: `review-${row.id}`,
+      movieId: Number(row.tmdb_id),
+      movie: { id: Number(row.tmdb_id) },
+      rating: row.rating,
+      comment: row.comment,
+      tags: Array.isArray(row.tags) ? row.tags : row.tags || [],
+      isRewatched: row.is_rewatched,
+      containsSpoilers: row.contains_spoilers,
+      visibility: row.visibility,
+      userId: friendId,
+      userName: friendUser.username || friendUser.email,
+      reactions: [],
+      comments: [],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    // Get friend's activity from in-memory map for now
+    const friendActivity = activities.get(friendId) || [];
+
+    console.log('Friend data:');
+    console.log('- Watchlist:', friendWatchlist.length, 'items');
+    console.log('- Currently Watching:', friendCurrentlyWatching.length, 'items');
+    console.log('- Watched:', friendWatched.length, 'items');
+    console.log('- Reviews:', friendReviews.length, 'items');
+    console.log('- Activity:', friendActivity.length, 'items');
+
+    const response = {
+      user: {
+        id: friendUser.id,
+        username: friendUser.username,
+        email: friendUser.email,
+      },
+      watchlist: friendWatchlist,
+      currentlyWatching: friendCurrentlyWatching,
+      watched: friendWatched,
+      reviews: friendReviews,
+      activity: friendActivity,
+    };
+
+    console.log('Sending response:', JSON.stringify(response, null, 2));
+    res.json(response);
+  } catch (err) {
+    console.error('Error fetching friend profile:', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
-  
-  // Get friend's basic info
-  const friendUser = getUserById(friendId);
-  if (!friendUser) {
-    return res.status(404).json({ error: 'Friend not found' });
-  }
-  
-  // Get friend's data
-  const friendLists = lists.get(friendId) || { watchlist: [], 'currently-watching': [], watched: [] };
-  const friendWatchlist = friendLists.watchlist || [];
-  const friendCurrentlyWatching = friendLists['currently-watching'] || [];
-  const friendWatched = friendLists.watched || [];
-  const friendReviews = reviews.get(friendId) || [];
-  
-  // Get friend's activity
-  const friendActivity = activity.get(friendId) || [];
-  
-  console.log('Friend data:');
-  console.log('- Watchlist:', friendWatchlist.length, 'items');
-  console.log('- Currently Watching:', friendCurrentlyWatching.length, 'items');
-  console.log('- Watched:', friendWatched.length, 'items');
-  console.log('- Reviews:', friendReviews.length, 'items');
-  console.log('- Activity:', friendActivity.length, 'items');
-  
-  const response = {
-    user: {
-      id: friendUser.id,
-      username: friendUser.username,
-      email: friendUser.email
-    },
-    watchlist: friendWatchlist,
-    currentlyWatching: friendCurrentlyWatching,
-    watched: friendWatched,
-    reviews: friendReviews,
-    activity: friendActivity
-  };
-  
-  console.log('Sending response:', JSON.stringify(response, null, 2));
-  res.json(response);
 });
 
-app.delete('/api/friends/remove/:friendId', requireAuth, (req, res) => {
+app.delete('/api/friends/remove/:friendId', requireAuth, async (req, res) => {
   const friendId = Number(req.params.friendId);
-  const userFriends = friends.get(req.userId) || [];
-  const friendFriends = friends.get(friendId) || [];
-  
-  // Remove friend from both users' friend lists
-  const userFriendsFiltered = userFriends.filter(f => f.id !== friendId);
-  const friendFriendsFiltered = friendFriends.filter(f => f.id !== req.userId);
-  
-  friends.set(req.userId, userFriendsFiltered);
-  friends.set(friendId, friendFriendsFiltered);
-  
-  res.json({ success: true, message: 'Friend removed successfully' });
+
+  try {
+    // Remove friendship in both directions from DB
+    await pool.query(
+      'DELETE FROM friends WHERE (user_id = $1 AND friend_user_id = $2) OR (user_id = $2 AND friend_user_id = $1)',
+      [req.userId, friendId]
+    );
+
+    // Refresh in-memory friends lists for both users
+    const meFriendsRes = await pool.query(
+      `SELECT u.id, u.username
+       FROM friends f
+       JOIN users u ON u.id = f.friend_user_id
+       WHERE f.user_id = $1
+       ORDER BY u.username`,
+      [req.userId]
+    );
+    friends.set(
+      req.userId,
+      meFriendsRes.rows.map((row) => ({ id: row.id, username: row.username }))
+    );
+
+    const otherFriendsRes = await pool.query(
+      `SELECT u.id, u.username
+       FROM friends f
+       JOIN users u ON u.id = f.friend_user_id
+       WHERE f.user_id = $1
+       ORDER BY u.username`,
+      [friendId]
+    );
+    friends.set(
+      friendId,
+      otherFriendsRes.rows.map((row) => ({ id: row.id, username: row.username }))
+    );
+
+    res.json({ success: true, message: 'Friend removed successfully' });
+  } catch (err) {
+    console.error('Error removing friend:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-app.get('/api/users/search', requireAuth, (req, res) => {
-  const q = String(req.query.q || '').toLowerCase();
-  const result = users.filter(u => u.username.toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
-  res.json(result);
+app.get('/api/users/search', requireAuth, async (req, res) => {
+  const q = String(req.query.q || '').toLowerCase().trim();
+  if (!q) {
+    return res.json([]);
+  }
+
+  try {
+    const pattern = `%${q}%`;
+    const { rows } = await pool.query(
+      `SELECT id, username, email
+       FROM users
+       WHERE LOWER(username) LIKE $1 OR LOWER(email) LIKE $1
+       ORDER BY username`,
+      [pattern]
+    );
+
+    const result = rows.map((row) => ({
+      id: row.id,
+      username: row.username,
+      email: row.email,
+    }));
+
+    // Optionally sync in-memory users cache for compatibility
+    result.forEach((u) => {
+      upsertInMemoryUser({ id: u.id, username: u.username, email: u.email });
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('Error searching users:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 

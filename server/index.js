@@ -870,7 +870,6 @@ app.get('/api/users/search', requireAuth, async (req, res) => {
   }
 });
 
-
 app.get('/api/friends/:friendId/movies', requireAuth, async (req, res) => {
   const friendId = Number(req.params.friendId);
   const list = req.query.list ? normalizeListType(req.query.list) : null;

@@ -693,6 +693,196 @@ app.post('/api/user/reviews', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/friends', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.username, u.email
+       FROM friends f
+       JOIN users u ON u.id = f.friend_user_id
+       WHERE f.user_id = $1
+       ORDER BY u.username`,
+      [req.userId]
+    );
+
+    const result = rows.map((row) => ({
+      id: row.id,
+      username: row.username,
+      email: row.email,
+    }));
+
+    friends.set(
+      req.userId,
+      result.map((f) => ({ id: f.id, username: f.username }))
+    );
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Error fetching friends:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/friends/requests', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT fr.id,
+              fr.from_user_id,
+              fr.to_user_id,
+              fr.status,
+              fr.created_at,
+              u.username,
+              u.email
+       FROM friend_requests fr
+       JOIN users u ON u.id = fr.from_user_id
+       WHERE fr.to_user_id = $1 AND fr.status = 'pending'
+       ORDER BY fr.created_at DESC`,
+      [req.userId]
+    );
+
+    const requests = rows.map((row) => ({
+      id: row.id,
+      fromUserId: row.from_user_id,
+      toUserId: row.to_user_id,
+      status: row.status,
+      senderUsername: row.username,
+      senderEmail: row.email,
+      createdAt: row.created_at,
+    }));
+
+    return res.json(requests);
+  } catch (err) {
+    console.error('Error fetching friend requests:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/friends/request', requireAuth, async (req, res) => {
+  const { userId } = req.body || {};
+  const targetId = Number(userId);
+
+  if (!targetId || targetId === req.userId) {
+    return res.status(400).json({ message: 'Invalid target user' });
+  }
+
+  try {
+    const existingFriend = await pool.query(
+      `SELECT 1 FROM friends
+       WHERE (user_id = $1 AND friend_user_id = $2)
+          OR (user_id = $2 AND friend_user_id = $1)
+       LIMIT 1`,
+      [req.userId, targetId]
+    );
+    if (existingFriend.rows.length) {
+      return res.status(400).json({ message: 'Already friends' });
+    }
+
+    const existingReq = await pool.query(
+      `SELECT 1 FROM friend_requests
+       WHERE ((from_user_id = $1 AND to_user_id = $2)
+          OR  (from_user_id = $2 AND to_user_id = $1))
+         AND status = 'pending'
+       LIMIT 1`,
+      [req.userId, targetId]
+    );
+    if (existingReq.rows.length) {
+      return res.status(400).json({ message: 'Request already exists' });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO friend_requests (from_user_id, to_user_id, status)
+       VALUES ($1, $2, 'pending')
+       RETURNING id, from_user_id, to_user_id, status, created_at`,
+      [req.userId, targetId]
+    );
+
+    const r = rows[0];
+    return res.json({
+      success: true,
+      request: {
+        id: r.id,
+        fromUserId: r.from_user_id,
+        toUserId: r.to_user_id,
+        status: r.status,
+        createdAt: r.created_at,
+      },
+    });
+  } catch (err) {
+    console.error('Error sending friend request:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/friends/accept/:requestId', requireAuth, async (req, res) => {
+  const requestId = Number(req.params.requestId);
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM friend_requests
+       WHERE id = $1 AND to_user_id = $2 AND status = 'pending'`,
+      [requestId, req.userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Friend request not found' });
+    }
+
+    const fr = rows[0];
+
+    await pool.query('BEGIN');
+
+    await pool.query(
+      `UPDATE friend_requests
+         SET status = 'accepted', responded_at = NOW()
+       WHERE id = $1`,
+      [requestId]
+    );
+
+    await pool.query(
+      `INSERT INTO friends (user_id, friend_user_id)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id, friend_user_id) DO NOTHING`,
+      [fr.from_user_id, fr.to_user_id]
+    );
+    await pool.query(
+      `INSERT INTO friends (user_id, friend_user_id)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id, friend_user_id) DO NOTHING`,
+      [fr.to_user_id, fr.from_user_id]
+    );
+
+    await pool.query('COMMIT');
+
+    return res.json({ success: true });
+  } catch (err) {
+    await pool.query('ROLLBACK').catch(() => {});
+    console.error('Error accepting friend request:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/friends/reject/:requestId', requireAuth, async (req, res) => {
+  const requestId = Number(req.params.requestId);
+
+  try {
+    const result = await pool.query(
+      `UPDATE friend_requests
+         SET status = 'rejected', responded_at = NOW()
+       WHERE id = $1 AND to_user_id = $2 AND status = 'pending'
+       RETURNING id`,
+      [requestId, req.userId]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ message: 'Friend request not found' });
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error rejecting friend request:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
 app.get('/api/friends/:friendId/profile', requireAuth, async (req, res) => {
   const friendId = Number(req.params.friendId);
 

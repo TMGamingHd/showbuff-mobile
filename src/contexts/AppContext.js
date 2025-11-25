@@ -920,6 +920,15 @@ export const AppProvider = ({ children }) => {
   const sendFriendRequest = async (targetUserId) => {
     try {
       const response = await BackendService.sendFriendRequest(targetUserId);
+
+      // BackendService.makeRequest returns { success: false, error, status } on HTTP errors
+      if (response && response.success === false) {
+        return {
+          success: false,
+          error: response.error || response.message || 'Failed to send friend request',
+        };
+      }
+
       const message = (response && (response.message || response.msg)) || 'Friend request sent!';
       return { success: true, message };
     } catch (error) {
@@ -1074,7 +1083,7 @@ export const AppProvider = ({ children }) => {
 
   const removeFriend = async (friendId) => {
     try {
-      const response = await BackendService.makeRequest(`/friends/remove/${friendId}`, {
+      const response = await BackendService.makeRequest(`/api/friends/remove/${friendId}`, {
         method: 'DELETE',
       });
       

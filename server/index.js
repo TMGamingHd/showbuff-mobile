@@ -776,16 +776,52 @@ app.post('/api/friends/request', requireAuth, async (req, res) => {
       return res.status(400).json({ message: 'Already friends' });
     }
 
+    // Look for any existing friend request between these two users
     const existingReq = await pool.query(
-      `SELECT 1 FROM friend_requests
-       WHERE ((from_user_id = $1 AND to_user_id = $2)
-          OR  (from_user_id = $2 AND to_user_id = $1))
-         AND status = 'pending'
+      `SELECT * FROM friend_requests
+       WHERE (from_user_id = $1 AND to_user_id = $2)
+          OR (from_user_id = $2 AND to_user_id = $1)
        LIMIT 1`,
       [req.userId, targetId]
     );
+
     if (existingReq.rows.length) {
-      return res.status(400).json({ message: 'Request already exists' });
+      const row = existingReq.rows[0];
+
+      // If the other user has already sent us a pending request, client should accept instead
+      if (row.status === 'pending' && row.from_user_id === targetId && row.to_user_id === req.userId) {
+        return res.status(400).json({ message: 'User has already sent you a friend request' });
+      }
+
+      // If we previously sent a request (any status), reuse that row by resetting it to pending
+      if (row.from_user_id === req.userId && row.to_user_id === targetId) {
+        if (row.status === 'pending') {
+          return res.status(400).json({ message: 'Request already exists' });
+        }
+
+        const updated = await pool.query(
+          `UPDATE friend_requests
+             SET status = 'pending',
+                 created_at = NOW(),
+                 responded_at = NULL
+           WHERE id = $1
+           RETURNING id, from_user_id, to_user_id, status, created_at`,
+          [row.id]
+        );
+
+        const ur = updated.rows[0];
+        return res.json({
+          success: true,
+          message: 'Friend request sent',
+          request: {
+            id: ur.id,
+            fromUserId: ur.from_user_id,
+            toUserId: ur.to_user_id,
+            status: ur.status,
+            createdAt: ur.created_at,
+          },
+        });
+      }
     }
 
     const { rows } = await pool.query(
@@ -798,6 +834,7 @@ app.post('/api/friends/request', requireAuth, async (req, res) => {
     const r = rows[0];
     return res.json({
       success: true,
+      message: 'Friend request sent',
       request: {
         id: r.id,
         fromUserId: r.from_user_id,

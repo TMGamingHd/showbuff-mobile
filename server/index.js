@@ -506,57 +506,30 @@ app.post('/api/user/add-to-list', requireAuth, async (req, res) => {
     const normalized = normalizeListType(listType);
     const show = await addShowToListDb(req.userId, normalized, movieId, movieData);
 
-    // Add to user activity (still in-memory for now)
-    const user = getUserById(req.userId);
-    const userActivities = activities.get(req.userId) || [];
-    userActivities.unshift({
-      id: `activity-${Date.now()}`,
-      type: 'list',
-      action: normalized === 'watchlist' ? 'added_to_watchlist' : 
-             normalized === 'currently-watching' ? 'added_to_currentlywatching' : 'added_to_watched',
-      userId: req.userId,
-      userName: user?.username || user?.email || 'User',
-      movieId: show.id,
-      movieTitle: show.title || 'Unknown Movie',
-      moviePoster: show.poster_path,
-      createdAt: new Date().toISOString()
-    });
-    activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
+    // Record list activity in Postgres so it persists across sessions
+    const action =
+      normalized === 'watchlist'
+        ? 'added_to_watchlist'
+        : normalized === 'currently-watching'
+        ? 'added_to_currentlywatching'
+        : 'added_to_watched';
+
+    await pool.query(
+      `INSERT INTO activities (user_id, type, action, tmdb_id, media_type, movie_title, movie_poster, visibility)
+       VALUES ($1, 'list', $2, $3, $4, $5, $6, 'friends')`,
+      [
+        req.userId,
+        action,
+        show.id,
+        (movieData && movieData.media_type) || 'movie',
+        show.title || 'Unknown Movie',
+        show.poster_path || null,
+      ]
+    );
 
     return res.json({ success: true, list: normalized, show });
   } catch (err) {
     console.error('Error adding to list:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-app.post('/api/user/remove-from-watchlist', requireAuth, async (req, res) => {
-  const { showId } = req.body || {};
-  try {
-    await removeShowFromListDb(req.userId, 'watchlist', showId);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('Error removing from watchlist:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-app.post('/api/user/remove-from-currently-watching', requireAuth, async (req, res) => {
-  const { showId } = req.body || {};
-  try {
-    await removeShowFromListDb(req.userId, 'currently-watching', showId);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('Error removing from currently-watching:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-app.post('/api/user/remove-from-watched', requireAuth, async (req, res) => {
-  const { showId } = req.body || {};
-  try {
-    await removeShowFromListDb(req.userId, 'watched', showId);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('Error removing from watched:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 });
@@ -573,22 +546,26 @@ app.post('/api/user/move-to-list', requireAuth, async (req, res) => {
 
     const { show, fromList: normalizedFrom, toList: normalizedTo } = result;
 
-    // Add to user activity (still in-memory for now)
-    const user = getUserById(req.userId);
-    const userActivities = activities.get(req.userId) || [];
-    userActivities.unshift({
-      id: `activity-${Date.now()}`,
-      type: 'list',
-      action: normalizedTo === 'watchlist' ? 'moved_to_watchlist' : 
-             normalizedTo === 'currently-watching' ? 'moved_to_currentlywatching' : 'moved_to_watched',
-      userId: req.userId,
-      userName: user?.username || user?.email || 'User',
-      movieId: show.id,
-      movieTitle: show.title || 'Unknown Movie',
-      moviePoster: show.poster_path,
-      createdAt: new Date().toISOString()
-    });
-    activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
+    // Record move activity in Postgres
+    const moveAction =
+      normalizedTo === 'watchlist'
+        ? 'moved_to_watchlist'
+        : normalizedTo === 'currently-watching'
+        ? 'moved_to_currentlywatching'
+        : 'moved_to_watched';
+
+    await pool.query(
+      `INSERT INTO activities (user_id, type, action, tmdb_id, media_type, movie_title, movie_poster, visibility)
+       VALUES ($1, 'list', $2, $3, $4, $5, $6, 'friends')`,
+      [
+        req.userId,
+        moveAction,
+        show.id,
+        (show && show.media_type) || 'movie',
+        show.title || 'Unknown Movie',
+        show.poster_path || null,
+      ]
+    );
 
     return res.json({ success: true, fromList: normalizedFrom, toList: normalizedTo, show });
   } catch (err) {
@@ -597,28 +574,6 @@ app.post('/api/user/move-to-list', requireAuth, async (req, res) => {
   }
 });
 
-// Copy show from a friend's list to the current user's list
-app.post('/api/user/copy-from-friend', requireAuth, async (req, res) => {
-  const { friendId, showId, toList } = req.body || {};
-  if (!friendId || !showId || !toList) return res.status(400).json({ message: 'friendId, showId, toList required' });
-
-  try {
-    const to = normalizeListType(toList);
-
-    // Try to find the show in any of the friend's lists; fall back to minimal show if not found
-    const friendShow = await findShowForUser(Number(friendId), showId);
-    const movieData = friendShow || { id: Number(showId) };
-
-    const show = await addShowToListDb(req.userId, to, showId, movieData);
-
-    return res.json({ success: true, list: to, show });
-  } catch (err) {
-    console.error('Error copying movie from friend:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-// ===== Reviews =====
 app.post('/api/user/reviews', requireAuth, async (req, res) => {
   const { showId, rating, comment, movie, tags, isRewatched, containsSpoilers, visibility } = req.body || {};
   if (!showId && !movie?.id) return res.status(400).json({ message: 'showId or movie required' });
@@ -708,40 +663,28 @@ app.post('/api/user/reviews', requireAuth, async (req, res) => {
       updatedAt,
     };
 
-    // Add to activity feed for social visibility (still in-memory for now)
-    const globalActivity = activities.get('global') || [];
-    if (review.visibility === 'public' || review.visibility === 'friends') {
-      globalActivity.unshift({
-        id: `activity-${Date.now()}`,
-        type: 'review',
-        action: isEditing ? 'updated' : 'reviewed',
-        userId: req.userId,
-        userName: review.userName,
-        movie: review.movie,
-        rating: review.rating,
-        content: review.comment,
-        createdAt: review.createdAt,
-        visibility: review.visibility,
-      });
-      activities.set('global', globalActivity.slice(0, 50));
-    }
+    // Persist review activity to Postgres so it appears in feeds
+    const activityAction = isEditing ? 'updated' : 'reviewed';
 
-    // Add to user's personal activity feed
-    const userActivities = activities.get(req.userId) || [];
-    userActivities.unshift({
-      id: `activity-${Date.now()}`,
-      type: 'review',
-      action: isEditing ? 'updated' : 'reviewed',
-      userId: req.userId,
-      userName: review.userName,
-      movieId: review.movieId,
-      movieTitle: review.movie?.title || 'Unknown Movie',
-      moviePoster: review.movie?.poster_path,
-      rating: review.rating,
-      comment: review.comment,
-      createdAt: review.createdAt,
-    });
-    activities.set(req.userId, userActivities.slice(0, 100));
+    await pool.query(
+      `INSERT INTO activities (
+         user_id, type, action,
+         tmdb_id, media_type, movie_title, movie_poster,
+         rating, comment, visibility
+       )
+       VALUES ($1, 'review', $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        req.userId,
+        activityAction,
+        review.movieId,
+        mediaType,
+        review.movie?.title || 'Unknown Movie',
+        review.movie?.poster_path || null,
+        review.rating,
+        review.comment,
+        review.visibility,
+      ]
+    );
 
     return res.json({ success: true, review, isEditing });
   } catch (error) {
@@ -750,336 +693,6 @@ app.post('/api/user/reviews', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/user/reviews', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      'SELECT * FROM reviews WHERE user_id = $1 ORDER BY updated_at DESC',
-      [req.userId]
-    );
-
-    const user = getUserById(req.userId);
-
-    const result = rows.map((row) => ({
-      id: `review-${row.id}`,
-      movieId: Number(row.tmdb_id),
-      movie: { id: Number(row.tmdb_id) },
-      rating: row.rating,
-      comment: row.comment,
-      tags: Array.isArray(row.tags) ? row.tags : row.tags || [],
-      isRewatched: row.is_rewatched,
-      containsSpoilers: row.contains_spoilers,
-      visibility: row.visibility,
-      userId: req.userId,
-      userName: user?.username || user?.email || 'User',
-      reactions: [],
-      comments: [],
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-
-    return res.json(result);
-  } catch (error) {
-    console.error('Error fetching user reviews:', error);
-    return res.status(500).json({ message: 'Internal server error', error: error.message });
-  }
-});
-
-app.get('/api/movie/:showId/reviews', requireAuth, async (req, res) => {
-  const showId = Number(req.params.showId);
-  try {
-    const { rows } = await pool.query(
-      `SELECT r.*, u.username, u.email
-       FROM reviews r
-       JOIN users u ON u.id = r.user_id
-       WHERE r.tmdb_id = $1
-       ORDER BY r.updated_at DESC`,
-      [showId]
-    );
-
-    const result = rows.map((row) => ({
-      id: `review-${row.id}`,
-      movieId: Number(row.tmdb_id),
-      movie: { id: Number(row.tmdb_id) },
-      rating: row.rating,
-      comment: row.comment,
-      tags: Array.isArray(row.tags) ? row.tags : row.tags || [],
-      isRewatched: row.is_rewatched,
-      containsSpoilers: row.contains_spoilers,
-      visibility: row.visibility,
-      userId: row.user_id,
-      userName: row.username || row.email,
-      reactions: [],
-      comments: [],
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-
-    return res.json(result);
-  } catch (error) {
-    console.error('Error fetching movie reviews:', error);
-    return res.status(500).json({ message: 'Internal server error', error: error.message });
-  }
-});
-
-// ===== Friends =====
-app.get('/api/friends', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT u.id, u.username
-       FROM friends f
-       JOIN users u ON u.id = f.friend_user_id
-       WHERE f.user_id = $1
-       ORDER BY u.username`,
-      [req.userId]
-    );
-
-    const userFriends = rows.map((row) => ({ id: row.id, username: row.username }));
-
-    // Keep in-memory friends map in sync for compatibility with messaging
-    friends.set(req.userId, userFriends);
-
-    console.log(`[${new Date().toISOString()}] GET /api/friends for user ${req.userId}`);
-    console.log('Current friends (from DB):', userFriends);
-
-    res.json(userFriends);
-  } catch (err) {
-    console.error('Error fetching friends:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-app.get('/api/friends/requests', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT fr.id, fr.from_user_id, fr.to_user_id, fr.created_at,
-              u.username AS sender_username, u.email AS sender_email
-       FROM friend_requests fr
-       JOIN users u ON u.id = fr.from_user_id
-       WHERE fr.to_user_id = $1 AND fr.status = 'pending'
-       ORDER BY fr.created_at DESC`,
-      [req.userId]
-    );
-
-    const requests = rows.map((row) => ({
-      id: String(row.id),
-      fromUserId: row.from_user_id,
-      toUserId: row.to_user_id,
-      senderUsername: row.sender_username,
-      senderEmail: row.sender_email,
-      createdAt: row.created_at,
-    }));
-
-    // Sync in-memory friendRequests map for unread counts compatibility
-    friendRequests.set(req.userId, requests);
-
-    res.json(requests);
-  } catch (err) {
-    console.error('Error fetching friend requests:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-app.post('/api/friends/request', requireAuth, async (req, res) => {
-  const { userId } = req.body || {};
-  if (!userId) return res.status(400).json({ message: 'userId required' });
-  const to = Number(userId);
-
-  try {
-    // Prevent self friend requests
-    if (req.userId === to) {
-      return res.status(400).json({ message: 'Cannot send friend request to yourself' });
-    }
-
-    // Ensure target user exists
-    const target = await pool.query('SELECT id FROM users WHERE id = $1', [to]);
-    if (!target.rows.length) {
-      return res.status(404).json({ message: 'Target user not found' });
-    }
-
-    // Check if users are already friends
-    const alreadyFriends = await pool.query(
-      `SELECT 1 FROM friends
-       WHERE (user_id = $1 AND friend_user_id = $2)
-          OR (user_id = $2 AND friend_user_id = $1)
-       LIMIT 1`,
-      [req.userId, to]
-    );
-    if (alreadyFriends.rows.length > 0) {
-      return res.status(409).json({ message: 'Users are already friends' });
-    }
-
-    // Check for existing pending request (both directions)
-    const existing = await pool.query(
-      `SELECT fr.id, fr.from_user_id, fr.to_user_id, fr.created_at,
-              u.username AS sender_username, u.email AS sender_email
-       FROM friend_requests fr
-       JOIN users u ON u.id = fr.from_user_id
-       WHERE ((fr.from_user_id = $1 AND fr.to_user_id = $2)
-           OR (fr.from_user_id = $2 AND fr.to_user_id = $1))
-         AND fr.status = 'pending'
-       LIMIT 1`,
-      [req.userId, to]
-    );
-
-    if (existing.rows.length > 0) {
-      const row = existing.rows[0];
-      const existingRequest = {
-        id: String(row.id),
-        fromUserId: row.from_user_id,
-        toUserId: row.to_user_id,
-        senderUsername: row.sender_username,
-        senderEmail: row.sender_email,
-        createdAt: row.created_at,
-      };
-      return res.status(409).json({
-        message: 'Friend request already exists',
-        existingRequest,
-      });
-    }
-
-    // Create new request
-    const insert = await pool.query(
-      `INSERT INTO friend_requests (from_user_id, to_user_id, status)
-       VALUES ($1, $2, 'pending')
-       ON CONFLICT (from_user_id, to_user_id) DO UPDATE
-         SET status = 'pending', responded_at = NULL
-       RETURNING id, from_user_id, to_user_id, created_at`,
-      [req.userId, to]
-    );
-
-    const row = insert.rows[0];
-    const fromUser = getUserById(req.userId);
-
-    const fr = {
-      id: String(row.id),
-      fromUserId: row.from_user_id,
-      toUserId: row.to_user_id,
-      senderUsername: fromUser?.username || null,
-      senderEmail: fromUser?.email || null,
-      createdAt: row.created_at,
-    };
-
-    // Update in-memory friendRequests for the receiver
-    const existingReqs = friendRequests.get(to) || [];
-    existingReqs.unshift(fr);
-    friendRequests.set(to, existingReqs);
-
-    res.json({ success: true, request: fr });
-  } catch (err) {
-    console.error('Error creating friend request:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-app.post('/api/friends/accept/:requestId', requireAuth, async (req, res) => {
-  const requestId = Number(req.params.requestId);
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT * FROM friend_requests
-       WHERE id = $1 AND to_user_id = $2 AND status = 'pending'`,
-      [requestId, req.userId]
-    );
-
-    if (!rows.length) {
-      return res.status(404).json({ message: 'Request not found' });
-    }
-
-    const r = rows[0];
-    const fromId = r.from_user_id;
-
-    await pool.query(
-      `UPDATE friend_requests
-         SET status = 'accepted', responded_at = NOW()
-       WHERE id = $1`,
-      [requestId]
-    );
-
-    // Add to friends table for both directions
-    await pool.query(
-      `INSERT INTO friends (user_id, friend_user_id)
-       VALUES ($1, $2), ($2, $1)
-       ON CONFLICT (user_id, friend_user_id) DO NOTHING`,
-      [req.userId, fromId]
-    );
-
-    // Refresh in-memory friends lists for both users
-    const meFriendsRes = await pool.query(
-      `SELECT u.id, u.username
-       FROM friends f
-       JOIN users u ON u.id = f.friend_user_id
-       WHERE f.user_id = $1
-       ORDER BY u.username`,
-      [req.userId]
-    );
-    friends.set(
-      req.userId,
-      meFriendsRes.rows.map((row) => ({ id: row.id, username: row.username }))
-    );
-
-    const otherFriendsRes = await pool.query(
-      `SELECT u.id, u.username
-       FROM friends f
-       JOIN users u ON u.id = f.friend_user_id
-       WHERE f.user_id = $1
-       ORDER BY u.username`,
-      [fromId]
-    );
-    friends.set(
-      fromId,
-      otherFriendsRes.rows.map((row) => ({ id: row.id, username: row.username }))
-    );
-
-    // Remove from in-memory friendRequests for current user
-    const existingReqs = friendRequests.get(req.userId) || [];
-    friendRequests.set(
-      req.userId,
-      existingReqs.filter((fr) => String(fr.id) !== String(requestId))
-    );
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Error accepting friend request:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-app.post('/api/friends/reject/:requestId', requireAuth, async (req, res) => {
-  const requestId = Number(req.params.requestId);
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT * FROM friend_requests
-       WHERE id = $1 AND to_user_id = $2 AND status = 'pending'`,
-      [requestId, req.userId]
-    );
-
-    if (!rows.length) {
-      return res.status(404).json({ message: 'Request not found' });
-    }
-
-    await pool.query(
-      `UPDATE friend_requests
-         SET status = 'rejected', responded_at = NOW()
-       WHERE id = $1`,
-      [requestId]
-    );
-
-    // Remove from in-memory friendRequests for current user
-    const existingReqs = friendRequests.get(req.userId) || [];
-    friendRequests.set(
-      req.userId,
-      existingReqs.filter((fr) => String(fr.id) !== String(requestId))
-    );
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Error rejecting friend request:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-// Get friend's profile data
 app.get('/api/friends/:friendId/profile', requireAuth, async (req, res) => {
   const friendId = Number(req.params.friendId);
 
@@ -1138,8 +751,18 @@ app.get('/api/friends/:friendId/profile', requireAuth, async (req, res) => {
       updatedAt: row.updated_at,
     }));
 
-    // Get friend's activity from in-memory map for now
-    const friendActivity = activities.get(friendId) || [];
+    // Get friend's activity from Postgres
+    const { rows: activityRows } = await pool.query(
+      `SELECT a.*, u.username, u.email
+       FROM activities a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.user_id = $1
+       ORDER BY a.created_at DESC
+       LIMIT 100`,
+      [friendId]
+    );
+
+    const friendActivity = activityRows.map(mapActivityRowToPost);
 
     console.log('Friend data:');
     console.log('- Watchlist:', friendWatchlist.length, 'items');

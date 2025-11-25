@@ -37,6 +37,150 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 
+// ===== List helpers (Postgres-backed) =====
+function normalizeListType(value) {
+  return String(value || '').replace(/_/g, '-');
+}
+
+async function getOrCreateUserListId(userId, listType) {
+  const normalized = normalizeListType(listType);
+  const result = await pool.query(
+    `INSERT INTO user_lists (user_id, list_type)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id, list_type) DO UPDATE SET list_type = EXCLUDED.list_type
+     RETURNING id`,
+    [userId, normalized]
+  );
+  return { id: result.rows[0].id, listType: normalized };
+}
+
+function rowToShow(row) {
+  const id = Number(row.tmdb_id);
+  const title = row.title || `Show #${id}`;
+  return {
+    id,
+    title,
+    name: title,
+    poster_path: row.poster_path || null,
+  };
+}
+
+async function getUserListItemsFromDb(userId, listType) {
+  const normalized = normalizeListType(listType);
+  const { rows } = await pool.query(
+    `SELECT li.tmdb_id, li.title, li.poster_path
+     FROM user_lists ul
+     JOIN list_items li ON li.user_list_id = ul.id
+     WHERE ul.user_id = $1 AND ul.list_type = $2
+     ORDER BY li.added_at DESC`,
+    [userId, normalized]
+  );
+  return rows.map(rowToShow);
+}
+
+async function addShowToListDb(userId, listType, movieId, movieData) {
+  const normalized = normalizeListType(listType);
+  const { id: listId } = await getOrCreateUserListId(userId, normalized);
+
+  const tmdbId = Number(movieId || movieData?.id);
+  const title = (movieData && (movieData.title || movieData.name)) || `Show #${tmdbId}`;
+  const posterPath = movieData?.poster_path || null;
+  const mediaType = movieData?.media_type || 'movie';
+  const releaseDate = movieData?.release_date || null;
+  const firstAirDate = movieData?.first_air_date || null;
+
+  await pool.query(
+    `INSERT INTO list_items (user_list_id, tmdb_id, media_type, title, poster_path, release_date, first_air_date)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (user_list_id, tmdb_id, media_type) DO NOTHING`,
+    [listId, tmdbId, mediaType, title, posterPath, releaseDate, firstAirDate]
+  );
+
+  return { id: tmdbId, title, name: title, poster_path: posterPath };
+}
+
+async function removeShowFromListDb(userId, listType, showId) {
+  const normalized = normalizeListType(listType);
+  const { rows } = await pool.query(
+    'SELECT id FROM user_lists WHERE user_id = $1 AND list_type = $2',
+    [userId, normalized]
+  );
+  if (!rows.length) return;
+  const listId = rows[0].id;
+  await pool.query(
+    'DELETE FROM list_items WHERE user_list_id = $1 AND tmdb_id = $2',
+    [listId, showId]
+  );
+}
+
+async function findShowForUser(userId, showId) {
+  const tmdbId = Number(showId);
+  const { rows } = await pool.query(
+    `SELECT li.tmdb_id, li.title, li.poster_path
+     FROM user_lists ul
+     JOIN list_items li ON li.user_list_id = ul.id
+     WHERE ul.user_id = $1 AND li.tmdb_id = $2
+     ORDER BY li.added_at DESC
+     LIMIT 1`,
+    [userId, tmdbId]
+  );
+  if (!rows.length) return null;
+  return rowToShow(rows[0]);
+}
+
+async function moveShowBetweenListsDb(userId, fromList, toList, movieId) {
+  const normalizedFrom = normalizeListType(fromList);
+  const normalizedTo = normalizeListType(toList);
+
+  const { rows } = await pool.query(
+    `SELECT
+        ul_from.id AS from_list_id,
+        ul_to.id   AS to_list_id
+     FROM user_lists ul_from
+     LEFT JOIN user_lists ul_to
+       ON ul_to.user_id = ul_from.user_id
+      AND ul_to.list_type = $3
+     WHERE ul_from.user_id = $1
+       AND ul_from.list_type = $2
+     LIMIT 1`,
+    [userId, normalizedFrom, normalizedTo]
+  );
+
+  if (!rows.length) {
+    return { notFound: true };
+  }
+
+  const fromListId = rows[0].from_list_id;
+  let toListId = rows[0].to_list_id;
+
+  const itemRes = await pool.query(
+    'SELECT * FROM list_items WHERE user_list_id = $1 AND tmdb_id = $2 LIMIT 1',
+    [fromListId, movieId]
+  );
+
+  if (!itemRes.rows.length) {
+    return { notFound: true };
+  }
+
+  const item = itemRes.rows[0];
+
+  if (!toListId) {
+    const created = await getOrCreateUserListId(userId, normalizedTo);
+    toListId = created.id;
+  }
+
+  await pool.query('DELETE FROM list_items WHERE id = $1', [item.id]);
+
+  await pool.query(
+    `INSERT INTO list_items (user_list_id, tmdb_id, media_type, title, poster_path, release_date, first_air_date)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (user_list_id, tmdb_id, media_type) DO NOTHING`,
+    [toListId, item.tmdb_id, item.media_type, item.title, item.poster_path, item.release_date, item.first_air_date]
+  );
+
+  return { show: rowToShow(item), fromList: normalizedFrom, toList: normalizedTo };
+}
+
 // Enable CORS and JSON parsing
 app.use(cors());
 app.use(express.json());
@@ -248,131 +392,152 @@ app.put('/api/user/profile/:userId', requireAuth, (req, res) => {
 });
 
 // ===== Lists =====
-app.get('/api/user/watchlist', requireAuth, (req, res) => {
-  const l = ensureUserLists(req.userId);
-  return res.json(l['watchlist'] || []);
+app.get('/api/user/watchlist', requireAuth, async (req, res) => {
+  try {
+    const items = await getUserListItemsFromDb(req.userId, 'watchlist');
+    return res.json(items);
+  } catch (err) {
+    console.error('Error fetching watchlist:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
-app.get('/api/user/currently-watching', requireAuth, (req, res) => {
-  const l = ensureUserLists(req.userId);
-  return res.json(l['currently-watching'] || []);
+app.get('/api/user/currently-watching', requireAuth, async (req, res) => {
+  try {
+    const items = await getUserListItemsFromDb(req.userId, 'currently-watching');
+    return res.json(items);
+  } catch (err) {
+    console.error('Error fetching currently-watching list:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
-app.get('/api/user/watched', requireAuth, (req, res) => {
-  const l = ensureUserLists(req.userId);
-  return res.json(l['watched'] || []);
+app.get('/api/user/watched', requireAuth, async (req, res) => {
+  try {
+    const items = await getUserListItemsFromDb(req.userId, 'watched');
+    return res.json(items);
+  } catch (err) {
+    console.error('Error fetching watched list:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-app.post('/api/user/add-to-list', requireAuth, (req, res) => {
+app.post('/api/user/add-to-list', requireAuth, async (req, res) => {
   const { movieId, listType, movieData } = req.body || {};
   if (!listType) return res.status(400).json({ message: 'listType required' });
-  const normalized = String(listType).replace('_', '-');
-  const l = ensureUserLists(req.userId);
-  const show = upsertShow(movieData || { id: movieId });
-  l[normalized] = l[normalized] || [];
-  const exists = l[normalized].some(s => Number(s.id) === Number(show.id));
-  if (!exists) l[normalized].push(show);
-  
-  // Add to user activity
-  const user = getUserById(req.userId);
-  const userActivities = activities.get(req.userId) || [];
-  userActivities.unshift({
-    id: `activity-${Date.now()}`,
-    type: 'list',
-    action: normalized === 'watchlist' ? 'added_to_watchlist' : 
-           normalized === 'currently-watching' ? 'added_to_currentlywatching' : 'added_to_watched',
-    userId: req.userId,
-    userName: user?.username || user?.email || 'User',
-    movieId: show.id,
-    movieTitle: show.title || 'Unknown Movie',
-    moviePoster: show.poster_path,
-    createdAt: new Date().toISOString()
-  });
-  activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
-  
-  return res.json({ success: true, list: normalized, show });
+
+  try {
+    const normalized = normalizeListType(listType);
+    const show = await addShowToListDb(req.userId, normalized, movieId, movieData);
+
+    // Add to user activity (still in-memory for now)
+    const user = getUserById(req.userId);
+    const userActivities = activities.get(req.userId) || [];
+    userActivities.unshift({
+      id: `activity-${Date.now()}`,
+      type: 'list',
+      action: normalized === 'watchlist' ? 'added_to_watchlist' : 
+             normalized === 'currently-watching' ? 'added_to_currentlywatching' : 'added_to_watched',
+      userId: req.userId,
+      userName: user?.username || user?.email || 'User',
+      movieId: show.id,
+      movieTitle: show.title || 'Unknown Movie',
+      moviePoster: show.poster_path,
+      createdAt: new Date().toISOString()
+    });
+    activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
+
+    return res.json({ success: true, list: normalized, show });
+  } catch (err) {
+    console.error('Error adding to list:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-function removeFrom(list, showId) {
-  const idx = list.findIndex(s => Number(s.id) === Number(showId));
-  if (idx >= 0) list.splice(idx, 1);
-}
+app.post('/api/user/remove-from-watchlist', requireAuth, async (req, res) => {
+  const { showId } = req.body || {};
+  try {
+    await removeShowFromListDb(req.userId, 'watchlist', showId);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error removing from watchlist:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+app.post('/api/user/remove-from-currently-watching', requireAuth, async (req, res) => {
+  const { showId } = req.body || {};
+  try {
+    await removeShowFromListDb(req.userId, 'currently-watching', showId);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error removing from currently-watching:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+app.post('/api/user/remove-from-watched', requireAuth, async (req, res) => {
+  const { showId } = req.body || {};
+  try {
+    await removeShowFromListDb(req.userId, 'watched', showId);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error removing from watched:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
 
-app.post('/api/user/remove-from-watchlist', requireAuth, (req, res) => {
-  const { showId } = req.body || {};
-  const l = ensureUserLists(req.userId);
-  l['watchlist'] = l['watchlist'] || [];
-  removeFrom(l['watchlist'], showId);
-  return res.json({ success: true });
-});
-app.post('/api/user/remove-from-currently-watching', requireAuth, (req, res) => {
-  const { showId } = req.body || {};
-  const l = ensureUserLists(req.userId);
-  l['currently-watching'] = l['currently-watching'] || [];
-  removeFrom(l['currently-watching'], showId);
-  return res.json({ success: true });
-});
-app.post('/api/user/remove-from-watched', requireAuth, (req, res) => {
-  const { showId } = req.body || {};
-  const l = ensureUserLists(req.userId);
-  l['watched'] = l['watched'] || [];
-  removeFrom(l['watched'], showId);
-  return res.json({ success: true });
-});
-
-app.post('/api/user/move-to-list', requireAuth, (req, res) => {
+app.post('/api/user/move-to-list', requireAuth, async (req, res) => {
   const { movieId, fromList, toList } = req.body || {};
   if (!fromList || !toList) return res.status(400).json({ message: 'fromList and toList required' });
-  
-  const normalizedFrom = String(fromList).replace('_', '-');
-  const normalizedTo = String(toList).replace('_', '-');
-  
-  const l = ensureUserLists(req.userId);
-  l[normalizedFrom] = l[normalizedFrom] || [];
-  l[normalizedTo] = l[normalizedTo] || [];
-  
-  const showIndex = l[normalizedFrom].findIndex(s => Number(s.id) === Number(movieId));
-  if (showIndex === -1) return res.status(404).json({ message: 'Movie not found in source list' });
-  
-  const show = l[normalizedFrom][showIndex];
-  l[normalizedFrom].splice(showIndex, 1);
-  
-  const exists = l[normalizedTo].some(s => Number(s.id) === Number(show.id));
-  if (!exists) l[normalizedTo].push(show);
-  
-  // Add to user activity
-  const user = getUserById(req.userId);
-  const userActivities = activities.get(req.userId) || [];
-  userActivities.unshift({
-    id: `activity-${Date.now()}`,
-    type: 'list',
-    action: normalizedTo === 'watchlist' ? 'moved_to_watchlist' : 
-           normalizedTo === 'currently-watching' ? 'moved_to_currentlywatching' : 'moved_to_watched',
-    userId: req.userId,
-    userName: user?.username || user?.email || 'User',
-    movieId: show.id,
-    movieTitle: show.title || 'Unknown Movie',
-    moviePoster: show.poster_path,
-    createdAt: new Date().toISOString()
-  });
-  activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
-  
-  return res.json({ success: true, fromList: normalizedFrom, toList: normalizedTo, show });
+
+  try {
+    const result = await moveShowBetweenListsDb(req.userId, fromList, toList, movieId);
+    if (result.notFound) {
+      return res.status(404).json({ message: 'Movie not found in source list' });
+    }
+
+    const { show, fromList: normalizedFrom, toList: normalizedTo } = result;
+
+    // Add to user activity (still in-memory for now)
+    const user = getUserById(req.userId);
+    const userActivities = activities.get(req.userId) || [];
+    userActivities.unshift({
+      id: `activity-${Date.now()}`,
+      type: 'list',
+      action: normalizedTo === 'watchlist' ? 'moved_to_watchlist' : 
+             normalizedTo === 'currently-watching' ? 'moved_to_currentlywatching' : 'moved_to_watched',
+      userId: req.userId,
+      userName: user?.username || user?.email || 'User',
+      movieId: show.id,
+      movieTitle: show.title || 'Unknown Movie',
+      moviePoster: show.poster_path,
+      createdAt: new Date().toISOString()
+    });
+    activities.set(req.userId, userActivities.slice(0, 100)); // Keep last 100 activities
+
+    return res.json({ success: true, fromList: normalizedFrom, toList: normalizedTo, show });
+  } catch (err) {
+    console.error('Error moving movie between lists:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // Copy show from a friend's list to the current user's list
-app.post('/api/user/copy-from-friend', requireAuth, (req, res) => {
+app.post('/api/user/copy-from-friend', requireAuth, async (req, res) => {
   const { friendId, showId, toList } = req.body || {};
   if (!friendId || !showId || !toList) return res.status(400).json({ message: 'friendId, showId, toList required' });
-  const to = String(toList).replace('_', '-');
-  const friendLists = ensureUserLists(Number(friendId));
-  const meLists = ensureUserLists(req.userId);
-  meLists[to] = meLists[to] || [];
-  // Find the show in any of friend's lists; if absent, upsert by id
-  const friendShow = (friendLists['watchlist'] || []).concat(friendLists['currently-watching'] || [], friendLists['watched'] || [])
-    .find(s => Number(s.id) === Number(showId));
-  const show = friendShow || upsertShow({ id: Number(showId) });
-  const already = meLists[to].some(s => Number(s.id) === Number(show.id));
-  if (!already) meLists[to].push(show);
-  return res.json({ success: true, list: to, show });
+
+  try {
+    const to = normalizeListType(toList);
+
+    // Try to find the show in any of the friend's lists; fall back to minimal show if not found
+    const friendShow = await findShowForUser(Number(friendId), showId);
+    const movieData = friendShow || { id: Number(showId) };
+
+    const show = await addShowToListDb(req.userId, to, showId, movieData);
+
+    return res.json({ success: true, list: to, show });
+  } catch (err) {
+    console.error('Error copying movie from friend:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // ===== Reviews =====
@@ -669,12 +834,31 @@ app.get('/api/users/search', requireAuth, (req, res) => {
 });
 
 
-app.get('/api/friends/:friendId/movies', requireAuth, (req, res) => {
+app.get('/api/friends/:friendId/movies', requireAuth, async (req, res) => {
   const friendId = Number(req.params.friendId);
-  const l = ensureUserLists(friendId);
-  const list = req.query.list ? String(req.query.list).replace('_', '-') : null;
-  if (list) return res.json(l[list] || []);
-  res.json({ watchlist: l['watchlist'] || [], 'currently-watching': l['currently-watching'] || [], watched: l['watched'] || [] });
+  const list = req.query.list ? normalizeListType(req.query.list) : null;
+
+  try {
+    if (list) {
+      const items = await getUserListItemsFromDb(friendId, list);
+      return res.json(items);
+    }
+
+    const [watchlist, currentlyWatching, watched] = await Promise.all([
+      getUserListItemsFromDb(friendId, 'watchlist'),
+      getUserListItemsFromDb(friendId, 'currently-watching'),
+      getUserListItemsFromDb(friendId, 'watched'),
+    ]);
+
+    return res.json({
+      watchlist,
+      'currently-watching': currentlyWatching,
+      watched,
+    });
+  } catch (err) {
+    console.error('Error fetching friend movies:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // ===== Activity =====

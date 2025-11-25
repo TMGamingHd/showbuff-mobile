@@ -32,11 +32,10 @@ const FriendsScreen = ({ navigation }) => {
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
 
-  const [activeTab, setActiveTab] = useState('friends'); // 'friends', 'requests', 'search'
+  // Unified search state: searches both existing friends (locally) and all users (via backend)
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
-  const [friendSearchQuery, setFriendSearchQuery] = useState('');
 
   useEffect(() => {
     if (searchQuery.length > 2) {
@@ -138,31 +137,15 @@ const FriendsScreen = ({ navigation }) => {
     );
   };
 
-  const filteredFriends = (friends || []).filter(friend =>
-    friend.username.toLowerCase().includes(friendSearchQuery.toLowerCase()) ||
-    friend.email.toLowerCase().includes(friendSearchQuery.toLowerCase())
-  );
+  const normalizedSearch = searchQuery.trim().toLowerCase();
 
-  const renderTabButton = (tab, title, icon) => (
-    <TouchableOpacity
-      style={[styles.tabButton, activeTab === tab && styles.activeTab]}
-      onPress={() => setActiveTab(tab)}
-    >
-      <Ionicons 
-        name={icon} 
-        size={20} 
-        color={activeTab === tab ? '#3B82F6' : '#6B7280'} 
-      />
-      <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>
-        {title}
-      </Text>
-      {tab === 'requests' && (friendRequests || []).length > 0 && (
-        <View style={styles.badge}>
-          <Text style={styles.badgeText}>{(friendRequests || []).length}</Text>
-        </View>
-      )}
-    </TouchableOpacity>
-  );
+  // Friends filtered locally by search query (used for both default view and search view)
+  const filteredFriends = (friends || []).filter((friend) => {
+    if (!normalizedSearch) return true;
+    const name = (friend.username || '').toLowerCase();
+    const email = (friend.email || '').toLowerCase();
+    return name.includes(normalizedSearch) || email.includes(normalizedSearch);
+  });
 
   const renderFriendItem = (friend) => (
     <View key={friend.id} style={styles.friendItem}>
@@ -303,14 +286,6 @@ const FriendsScreen = ({ navigation }) => {
       <View style={[styles.header, { paddingTop: (insets?.top || 0) + 12 }]}>
         <Text style={styles.headerTitle}>Friends</Text>
       </View>
-
-      {/* Tab Navigation */}
-      <View style={styles.tabContainer}>
-        {renderTabButton('friends', 'Friends', 'people-outline')}
-        {renderTabButton('requests', 'Requests', 'mail-outline')}
-        {renderTabButton('search', 'Search', 'search-outline')}
-      </View>
-
       {/* Content */}
       <ScrollView
         style={styles.content}
@@ -318,25 +293,42 @@ const FriendsScreen = ({ navigation }) => {
           <RefreshControl refreshing={refreshing} onRefresh={refreshData} />
         }
       >
-        {/* Friends Tab */}
-        {activeTab === 'friends' && (
-          <View>
-            {/* Search Friends */}
-            <View style={styles.searchContainer}>
-              <Ionicons name="search" size={20} color="#9CA3AF" style={styles.searchIcon} />
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search your friends..."
-                value={friendSearchQuery}
-                onChangeText={setFriendSearchQuery}
-                placeholderTextColor="#9CA3AF"
-              />
-            </View>
+        {/* Unified search bar for friends + users */}
+        <View style={styles.searchContainer}>
+          <Ionicons name="search" size={20} color="#9CA3AF" style={styles.searchIcon} />
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search friends and users by username or email..."
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholderTextColor="#9CA3AF"
+          />
+        </View>
 
-            {/* Friends List */}
+        {/* Friend Requests section (always on this screen) */}
+        {(friendRequests || []).length > 0 && (
+          <View style={{ marginBottom: 16 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+              <Ionicons name="mail-outline" size={18} color="#6B7280" />
+              <Text style={{ marginLeft: 6, fontSize: 14, fontWeight: '600', color: '#4B5563' }}>
+                Friend Requests ({(friendRequests || []).length})
+              </Text>
+            </View>
+            {loading ? (
+              <ActivityIndicator size="small" color="#3B82F6" style={styles.loader} />
+            ) : (
+              (friendRequests || []).map(renderFriendRequest)
+            )}
+          </View>
+        )}
+
+        {/* Friends list / Search results (single unified view) */}
+        {normalizedSearch.length <= 2 ? (
+          // Default view: just show all friends when not searching
+          <View>
             {loading ? (
               <ActivityIndicator size="large" color="#3B82F6" style={styles.loader} />
-            ) : filteredFriends.length > 0 ? (
+            ) : (filteredFriends || []).length > 0 ? (
               filteredFriends.map(renderFriendItem)
             ) : (
               <View style={styles.emptyState}>
@@ -348,61 +340,27 @@ const FriendsScreen = ({ navigation }) => {
               </View>
             )}
           </View>
-        )}
-
-        {/* Friend Requests Tab */}
-        {activeTab === 'requests' && (
+        ) : (
+          // Search view: combined results (matching friends + other users)
           <View>
-            {loading ? (
-              <ActivityIndicator size="large" color="#3B82F6" style={styles.loader} />
-            ) : (friendRequests || []).length > 0 ? (
-              (friendRequests || []).map(renderFriendRequest)
-            ) : (
-              <View style={styles.emptyState}>
-                <Ionicons name="mail-outline" size={64} color="#D1D5DB" />
-                <Text style={styles.emptyTitle}>No Friend Requests</Text>
-                <Text style={styles.emptySubtitle}>
-                  You'll see friend requests here
-                </Text>
+            {/* Matching friends first */}
+            {(filteredFriends || []).length > 0 && (
+              <View style={{ marginBottom: 8 }}>
+                {filteredFriends.map(renderFriendItem)}
               </View>
             )}
-          </View>
-        )}
 
-        {/* Search Tab */}
-        {activeTab === 'search' && (
-          <View>
-            {/* Search Input */}
-            <View style={styles.searchContainer}>
-              <Ionicons name="search" size={20} color="#9CA3AF" style={styles.searchIcon} />
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search users by username or email..."
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-                placeholderTextColor="#9CA3AF"
-              />
-            </View>
-
-            {/* Search Results */}
+            {/* Backend user search results */}
             {searchLoading ? (
               <ActivityIndicator size="large" color="#3B82F6" style={styles.loader} />
             ) : searchResults.length > 0 ? (
               searchResults.map(renderSearchResult)
-            ) : searchQuery.length > 2 ? (
+            ) : (
               <View style={styles.emptyState}>
                 <Ionicons name="search-outline" size={64} color="#D1D5DB" />
                 <Text style={styles.emptyTitle}>No Users Found</Text>
                 <Text style={styles.emptySubtitle}>
                   Try a different search term
-                </Text>
-              </View>
-            ) : (
-              <View style={styles.emptyState}>
-                <Ionicons name="search-outline" size={64} color="#D1D5DB" />
-                <Text style={styles.emptyTitle}>Search for Friends</Text>
-                <Text style={styles.emptySubtitle}>
-                  Enter a username or email to find users
                 </Text>
               </View>
             )}

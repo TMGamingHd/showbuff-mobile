@@ -36,6 +36,7 @@ const ensureUserActivity = (userId) => {
 const app = express();
 const PORT = process.env.PORT || 3001;
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
+const INTERNAL_SERVICE_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || '';
 
 // ===== List helpers (Postgres-backed) =====
 function normalizeListType(value) {
@@ -259,6 +260,20 @@ async function requireAuth(req, res, next) {
   next();
 }
 
+// Internal service-to-service auth using a shared secret header.
+function requireInternalService(req, res, next) {
+  const provided =
+    req.headers['x-internal-service-token'] ||
+    req.headers['x-internal-service-auth'] ||
+    req.headers['x_internal_service_token'];
+
+  if (!INTERNAL_SERVICE_TOKEN || !provided || provided !== INTERNAL_SERVICE_TOKEN) {
+    return res.status(401).json({ message: 'Unauthorized internal request' });
+  }
+
+  next();
+}
+
 // ===== Auth endpoints =====
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
@@ -321,6 +336,83 @@ app.post('/api/auth/login', async (req, res) => {
     return res.json({ token, user: { id: row.id, username: row.username, email: row.email } });
   } catch (err) {
     console.error('Error during login:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// Internal endpoint used by the importer backend to apply bulk list updates
+// for a specific user. Protected by the INTERNAL_SERVICE_TOKEN shared secret.
+//
+// Body:
+// {
+//   "userId": 123,
+//   "choices": [
+//     { "tmdbId": 550, "mediaType": "movie", "listType": "watchlist" },
+//     ...
+//   ]
+// }
+app.post('/api/internal/import/apply-list-updates', requireInternalService, async (req, res) => {
+  const { userId, choices } = req.body || {};
+
+  const numericUserId = Number(userId);
+  if (!numericUserId || !Number.isInteger(numericUserId)) {
+    return res.status(400).json({ message: 'Valid userId is required' });
+  }
+
+  if (!Array.isArray(choices) || choices.length === 0) {
+    return res.status(400).json({ message: 'choices array is required' });
+  }
+
+  const results = [];
+
+  try {
+    for (const choice of choices) {
+      const tmdbId = Number(choice.tmdbId);
+      const mediaType = (choice.mediaType || 'movie').toString();
+      const listType = (choice.listType || '').toString();
+
+      if (!tmdbId || !listType) {
+        results.push({ choice, success: false, error: 'tmdbId and listType are required' });
+        continue;
+      }
+
+      const normalized = normalizeListType(listType);
+
+      try {
+        const movieData = { id: tmdbId, media_type: mediaType };
+        const show = await addShowToListDb(numericUserId, normalized, tmdbId, movieData);
+
+        const action =
+          normalized === 'watchlist'
+            ? 'added_to_watchlist'
+            : normalized === 'currently-watching'
+            ? 'added_to_currentlywatching'
+            : 'added_to_watched';
+
+        await pool.query(
+          `INSERT INTO activities (user_id, type, action, tmdb_id, media_type, movie_title, movie_poster, visibility)
+           VALUES ($1, 'list', $2, $3, $4, $5, $6, 'friends')`,
+          [
+            numericUserId,
+            action,
+            show.id,
+            mediaType,
+            show.title || 'Unknown Movie',
+            show.poster_path || null,
+          ]
+        );
+
+        results.push({ choice: { tmdbId, mediaType, listType: normalized }, success: true });
+      } catch (err) {
+        console.error('Internal import apply error for choice:', choice, err);
+        results.push({ choice, success: false, error: 'Failed to apply choice' });
+      }
+    }
+
+    const applied = results.filter((r) => r.success).length;
+    return res.json({ success: true, applied, results });
+  } catch (err) {
+    console.error('Error applying internal import list updates:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 });

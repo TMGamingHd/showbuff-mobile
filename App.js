@@ -36,6 +36,7 @@ import ProfileScreen from './src/screens/ProfileScreen';
 import MovieShareScreen from './src/screens/MovieShareScreen';
 import PopularMoviesScreen from './src/screens/PopularMoviesScreen';
 import NotificationsScreen from './src/screens/NotificationsScreen';
+import ImportReviewScreen from './src/screens/ImportReviewScreen';
 import { dbToClient, listLabel } from './src/utils/lists';
 import { showToast } from './src/utils/toast';
 import { showMoveDialog } from './src/utils/moveDialog';
@@ -664,6 +665,11 @@ const MainApp = () => {
             name="ReviewWrite" 
             component={ReviewWriteScreen}
             options={{ presentation: 'modal' }}
+          />
+          <Stack.Screen
+            name="ImportReview"
+            component={ImportReviewScreen}
+            options={{ headerShown: false }}
           />
         </Stack.Navigator>
         <StatusBar style="auto" />

@@ -87,6 +87,33 @@ class ImporterService {
       body: JSON.stringify(payload),
     });
   }
+
+  // Convenience alias for matches endpoint
+  async getImportDetails(importId) {
+    return this.getMatches(importId);
+  }
+
+  /**
+   * Run TMDB-backed search for a specific extracted title.
+   * body: { title?: string, year?: number }
+   */
+  async searchTitle(importId, extractedTitleId, params = {}) {
+    if (!importId) throw new Error('importId is required');
+    if (!extractedTitleId) throw new Error('extractedTitleId is required');
+    return await this._fetchJson(`/api/import/${importId}/titles/${extractedTitleId}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params || {}),
+    });
+  }
+
+  /**
+   * List pending (non-completed) import sessions for an optional user.
+   */
+  async getPendingImports(userId) {
+    const query = userId ? `?userId=${encodeURIComponent(String(userId))}` : '';
+    return await this._fetchJson(`/api/import/matches/pending${query}`);
+  }
 }
 
 export default new ImporterService();

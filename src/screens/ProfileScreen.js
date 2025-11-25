@@ -13,12 +13,14 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker';
 import { useApp } from '../contexts/AppContext';
 import { useAuth } from '../contexts/AuthContext';
 import TMDBService from '../services/tmdb';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import FriendSelectionModal from '../components/FriendSelectionModal';
 import { showToast } from '../utils/toast';
+import ImporterService from '../services/importer';
 
 const ProfileScreen = ({ navigation }) => {
   const { 
@@ -97,6 +99,52 @@ const ProfileScreen = ({ navigation }) => {
       await refreshDebugInfo();
     } catch (e) {
       console.warn('[Profile Debug] Force load failed:', e);
+    }
+  };
+
+  const handleImportPress = async () => {
+    if (!user?.id) {
+      showToast('You must be logged in to import');
+      return;
+    }
+
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+
+      if (!result || result.canceled || result.type === 'cancel') {
+        return;
+      }
+
+      const file = Array.isArray(result.assets) && result.assets.length > 0 ? result.assets[0] : result;
+
+      if (!file?.uri) {
+        showToast('No file selected');
+        return;
+      }
+
+      const payload = {
+        uri: file.uri,
+        name: file.name || file.originalFilename || 'import.txt',
+        mimeType: file.mimeType || file.type || 'text/plain',
+      };
+
+      const response = await ImporterService.uploadFile(payload, user.id);
+      const importId = response?.importId;
+      if (importId) {
+        showToast('Import started');
+        navigation.navigate('ImportReview', { importId });
+      } else {
+        showToast('Import request sent');
+      }
+      console.log('[Importer] Upload response:', response);
+    } catch (error) {
+      console.error('Error starting import:', error);
+      const message = error?.message || 'Failed to start import';
+      showToast(message);
     }
   };
 
@@ -459,13 +507,21 @@ const ProfileScreen = ({ navigation }) => {
             <Text style={styles.email}>{user?.email || 'user@example.com'}</Text>
           </View>
         </View>
-        
-        <TouchableOpacity 
-          style={styles.settingsButton}
-          onPress={() => signOut()}
-        >
-          <Ionicons name="log-out-outline" size={22} color="#6B7280" />
-        </TouchableOpacity>
+
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <TouchableOpacity
+            style={[styles.settingsButton, { marginRight: 8 }]}
+            onPress={handleImportPress}
+          >
+            <Ionicons name="cloud-upload-outline" size={22} color="#6B7280" />
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={styles.settingsButton}
+            onPress={() => signOut()}
+          >
+            <Ionicons name="log-out-outline" size={22} color="#6B7280" />
+          </TouchableOpacity>
+        </View>
       </View>
       
       <View style={styles.tabContainer}>

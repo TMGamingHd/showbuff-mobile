@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 from uuid import UUID
 
+import requests
 from flask import request, jsonify
 
 from . import importer_bp
 from ..extensions import db
-from ..models import ImportSession, ExtractedTitle, TitleMatch
+from ..models import ImportSession, ExtractedTitle, TitleMatch, Movie, TVShow
 
 
 @importer_bp.post("/file")
@@ -71,24 +72,42 @@ def get_import_matches(import_id: str):
 
     titles = []
     for t in session.extracted_titles:
+        matches_payload = []
+        for m in t.matches:
+            title = None
+            year = None
+            if m.media_type == "movie" and m.local_id:
+                movie = Movie.query.get(m.local_id)
+                if movie:
+                    title = movie.title
+                    year = movie.year
+            elif m.media_type == "tv" and m.local_id:
+                show = TVShow.query.get(m.local_id)
+                if show:
+                    title = show.name
+                    year = show.first_air_year
+
+            matches_payload.append(
+                {
+                    "id": m.id,
+                    "mediaType": m.media_type,
+                    "tmdbId": m.tmdb_id,
+                    "localId": m.local_id,
+                    "confidence": m.confidence,
+                    "matchMethod": m.match_method,
+                    "isAmbiguous": m.is_ambiguous,
+                    "title": title,
+                    "year": year,
+                }
+            )
+
         titles.append(
             {
                 "id": t.id,
                 "rawText": t.raw_text,
                 "normalizedTitle": t.normalized_title,
                 "year": t.year,
-                "matches": [
-                    {
-                        "id": m.id,
-                        "mediaType": m.media_type,
-                        "tmdbId": m.tmdb_id,
-                        "localId": m.local_id,
-                        "confidence": m.confidence,
-                        "matchMethod": m.match_method,
-                        "isAmbiguous": m.is_ambiguous,
-                    }
-                    for m in t.matches
-                ],
+                "matches": matches_payload,
             }
         )
 
@@ -118,11 +137,10 @@ def confirm_matches():
       ]
     }
 
-    For now this endpoint only validates that the referenced ImportSession,
-    ExtractedTitle, and TitleMatch rows exist and belong together. It stores
-    aggregate stats on the ImportSession but does not yet call the
-    main ShowBuff backend to mutate user lists; the mobile app should still
-    call the existing list endpoints for that.
+    This endpoint validates that the referenced ImportSession,
+    ExtractedTitle, and TitleMatch rows exist and belong together and then
+    (when configured) calls the main ShowBuff backend to mutate user lists
+    via its internal apply-list-updates API.
     """
     payload = request.get_json(silent=True) or {}
     import_id = payload.get("importId")
@@ -176,14 +194,53 @@ def confirm_matches():
             }
         )
 
-    # For now we just echo back the validated choices; in a future iteration
-    # we could persist them on a dedicated table or fan out to the main
-    # ShowBuff backend for list mutations.
-    return jsonify({
-        "importId": str(session.id),
-        "validated": validated,
-        "invalid": invalid,
-    })
+    backend_applied: dict | None = None
+    backend_error: dict | None = None
+
+    backend_base_url = os.getenv("SHOWBUFF_BACKEND_URL", "").rstrip("/")
+    internal_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
+    if validated and session.user_id and backend_base_url and internal_token:
+        payload = {
+            "userId": session.user_id,
+            "choices": [
+                {
+                    "tmdbId": v["tmdbId"],
+                    "mediaType": v["mediaType"],
+                    "listType": v["listType"],
+                }
+                for v in validated
+            ],
+        }
+
+        try:
+            resp = requests.post(
+                f"{backend_base_url}/api/internal/import/apply-list-updates",
+                json=payload,
+                headers={"X-Internal-Service-Token": internal_token},
+                timeout=15,
+            )
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+
+            if resp.ok:
+                backend_applied = data or {}
+            else:
+                backend_error = {"status": resp.status_code, "body": data}
+        except Exception as exc:  # pragma: no cover - network/infra issues
+            backend_error = {"error": str(exc)}
+
+    return jsonify(
+        {
+            "importId": str(session.id),
+            "validated": validated,
+            "invalid": invalid,
+            "backendApplied": backend_applied,
+            "backendError": backend_error,
+        }
+    )
 
 
 @importer_bp.get("/matches/pending")
@@ -207,4 +264,87 @@ def get_pending_imports():
             }
             for s in sessions
         ]
+    )
+
+
+@importer_bp.post("/<import_id>/titles/<int:extracted_id>/search")
+def search_for_title(import_id: str, extracted_id: int):
+    """Run TMDB-backed search for a specific extracted title.
+
+    Body:
+    {
+      "title": "...",  # optional override for normalized title
+      "year": 2024       # optional
+    }
+    """
+    try:
+        session_id = UUID(import_id)
+    except ValueError:
+        return jsonify({"error": "invalid import id"}), 400
+
+    session = ImportSession.query.get(session_id)
+    if not session:
+        return jsonify({"error": "import not found"}), 404
+
+    extracted = ExtractedTitle.query.get(extracted_id)
+    if not extracted or extracted.import_id != session.id:
+        return jsonify({"error": "extracted title not found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    override_title = (payload.get("title") or "").strip()
+    override_year = payload.get("year")
+
+    if override_title:
+        extracted.normalized_title = override_title
+    if isinstance(override_year, int):
+        extracted.year = override_year
+
+    TitleMatch.query.filter_by(extracted_title_id=extracted.id).delete()
+    db.session.flush()
+
+    from .search import find_matches_for_extracted_title
+
+    matches = find_matches_for_extracted_title(extracted)
+    for m in matches:
+        db.session.add(m)
+
+    db.session.commit()
+
+    matches_payload = []
+    for m in matches:
+        title = None
+        year = None
+        if m.media_type == "movie" and m.local_id:
+            movie = Movie.query.get(m.local_id)
+            if movie:
+                title = movie.title
+                year = movie.year
+        elif m.media_type == "tv" and m.local_id:
+            show = TVShow.query.get(m.local_id)
+            if show:
+                title = show.name
+                year = show.first_air_year
+
+        matches_payload.append(
+            {
+                "id": m.id,
+                "mediaType": m.media_type,
+                "tmdbId": m.tmdb_id,
+                "localId": m.local_id,
+                "confidence": m.confidence,
+                "matchMethod": m.match_method,
+                "isAmbiguous": m.is_ambiguous,
+                "title": title,
+                "year": year,
+            }
+        )
+
+    return jsonify(
+        {
+            "extractedTitleId": extracted.id,
+            "rawText": extracted.raw_text,
+            "normalizedTitle": extracted.normalized_title,
+            "year": extracted.year,
+            "matches": matches_payload,
+        }
     )

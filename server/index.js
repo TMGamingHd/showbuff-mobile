@@ -827,6 +827,11 @@ app.post('/api/friends/request', requireAuth, async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO friend_requests (from_user_id, to_user_id, status)
        VALUES ($1, $2, 'pending')
+       ON CONFLICT (from_user_id, to_user_id)
+       DO UPDATE SET
+         status = 'pending',
+         created_at = NOW(),
+         responded_at = NULL
        RETURNING id, from_user_id, to_user_id, status, created_at`,
       [req.userId, targetId]
     );

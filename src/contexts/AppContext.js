@@ -526,16 +526,22 @@ export const AppProvider = ({ children }) => {
         console.log('All movies have complete data, no refresh needed');
         return;
       }
-      
-      console.log(`Refreshing ${incompleteMovies.length} incomplete movies from TMDB...`);
-      
-      // Batch fetch movie details from TMDB
+
+      // Fetch updated details for each incomplete item, respecting movie vs TV
       const movieUpdatePromises = incompleteMovies.map(async (movie) => {
         try {
-          console.log(`Fetching details for movie ID: ${movie.id}`);
-          const tmdbDetails = await TMDBService.getMovieDetails(movie.id);
+          const isTv = movie.media_type === 'tv' || movie.type === 'tv';
+          console.log(`Fetching details for ${isTv ? 'TV show' : 'movie'} ID: ${movie.id}`);
+          const tmdbDetails = isTv
+            ? await TMDBService.getTVDetails(movie.id)
+            : await TMDBService.getMovieDetails(movie.id);
+
+          // If TMDB could not return a real title, avoid overwriting with junk/demo data
+          const hasRealTitle = Boolean(tmdbDetails && (tmdbDetails.title || tmdbDetails.name));
+          if (!hasRealTitle) {
+            return movie;
+          }
           
-          // Merge the TMDB data with existing movie data
           return {
             ...movie,
             title: tmdbDetails.title || movie.title,
@@ -553,23 +559,25 @@ export const AppProvider = ({ children }) => {
             popularity: tmdbDetails.popularity || movie.popularity,
             adult: tmdbDetails.adult !== undefined ? tmdbDetails.adult : movie.adult,
             original_language: tmdbDetails.original_language || movie.original_language,
-            original_title: tmdbDetails.original_title || movie.original_title
+            original_title: tmdbDetails.original_title || tmdbDetails.original_name || movie.original_title,
+            media_type: movie.media_type || (isTv ? 'tv' : 'movie'),
+            type: movie.type || (isTv ? 'tv' : 'movie'),
           };
         } catch (error) {
-          console.error(`Failed to fetch details for movie ${movie.id}:`, error);
-          return movie; // Return original movie if fetch fails
+          console.error(`Failed to fetch details for item ${movie.id}:`, error);
+          return movie;
         }
       });
-      
+
       const updatedMovies = await Promise.all(movieUpdatePromises);
-      console.log(`Successfully refreshed ${updatedMovies.length} movies`);
+      console.log(`Successfully refreshed ${updatedMovies.length} movies/shows`);
       
       // Create lookup map of updated movies
-      const updatedMoviesMap = new Map(updatedMovies.map(movie => [movie.id, movie]));
+      const updatedMoviesMap = new Map(updatedMovies.map((movie) => [movie.id, movie]));
       
       // Update each list with refreshed movie data
       const updateMovieList = (movieList) => {
-        return movieList.map(movie => updatedMoviesMap.get(movie.id) || movie);
+        return movieList.map((movie) => updatedMoviesMap.get(movie.id) || movie);
       };
       
       const refreshedWatchlist = updateMovieList(watchlistMovies);
@@ -590,6 +598,7 @@ export const AppProvider = ({ children }) => {
     }
   };
 
+// ... (rest of the code remains the same)
   // Helper functions for list management
   const getListByType = (listType) => {
     const normalized = normalizeListType(listType);

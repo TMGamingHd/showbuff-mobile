@@ -63,13 +63,21 @@ function rowToShow(row) {
     title,
     name: title,
     poster_path: row.poster_path || null,
+    media_type: row.media_type || 'movie',
+    release_date: row.release_date || null,
+    first_air_date: row.first_air_date || null,
   };
 }
 
 async function getUserListItemsFromDb(userId, listType) {
   const normalized = normalizeListType(listType);
   const { rows } = await pool.query(
-    `SELECT li.tmdb_id, li.title, li.poster_path
+    `SELECT li.tmdb_id,
+            li.title,
+            li.poster_path,
+            li.media_type,
+            li.release_date,
+            li.first_air_date
      FROM user_lists ul
      JOIN list_items li ON li.user_list_id = ul.id
      WHERE ul.user_id = $1 AND ul.list_type = $2

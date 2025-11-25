@@ -55,8 +55,11 @@ const MovieDetailScreen = ({ route, navigation }) => {
   const loadMovieDetails = async () => {
     try {
       setLoading(true);
-      const details = await TMDBService.getMovieDetails(movie.id);
-      setMovie({ ...movie, ...details });
+      const isTv = movie.media_type === 'tv' || movie.type === 'tv';
+      const details = isTv
+        ? await TMDBService.getTVDetails(movie.id)
+        : await TMDBService.getMovieDetails(movie.id);
+      setMovie({ ...movie, ...details, media_type: movie.media_type || (isTv ? 'tv' : 'movie'), type: movie.type || (isTv ? 'tv' : 'movie') });
     } catch (error) {
       console.error('Error loading movie details:', error);
     } finally {

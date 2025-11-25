@@ -37,10 +37,63 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 const INTERNAL_SERVICE_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || '';
+const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
+const TMDB_BASE_URL = process.env.TMDB_BASE_URL || 'https://api.themoviedb.org/3';
 
 // ===== List helpers (Postgres-backed) =====
 function normalizeListType(value) {
   return String(value || '').replace(/_/g, '-');
+}
+
+async function fetchTmdbDetails(tmdbId, mediaType) {
+  try {
+    if (!TMDB_API_KEY || !tmdbId) {
+      return null;
+    }
+
+    if (typeof fetch !== 'function') {
+      console.warn('Global fetch is not available; TMDB enrichment disabled');
+      return null;
+    }
+
+    const lower = String(mediaType || 'movie').toLowerCase();
+    const pathType = lower === 'tv' ? 'tv' : 'movie';
+    const url = `${TMDB_BASE_URL}/${pathType}/${tmdbId}?api_key=${TMDB_API_KEY}`;
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      return null;
+    }
+
+    const data = await res.json();
+
+    if (pathType === 'tv') {
+      return {
+        id: Number(tmdbId),
+        title: data.name,
+        name: data.name,
+        poster_path: data.poster_path || null,
+        release_date: data.first_air_date || null,
+        first_air_date: data.first_air_date || null,
+        media_type: 'tv',
+        type: 'tv',
+      };
+    }
+
+    return {
+      id: Number(tmdbId),
+      title: data.title,
+      name: data.title,
+      poster_path: data.poster_path || null,
+      release_date: data.release_date || null,
+      first_air_date: null,
+      media_type: 'movie',
+      type: 'movie',
+    };
+  } catch (err) {
+    console.error('Failed to fetch TMDB details for', tmdbId, 'mediaType', mediaType, err);
+    return null;
+  }
 }
 
 async function getOrCreateUserListId(userId, listType) {
@@ -92,11 +145,33 @@ async function addShowToListDb(userId, listType, movieId, movieData) {
   const { id: listId } = await getOrCreateUserListId(userId, normalized);
 
   const tmdbId = Number(movieId || movieData?.id);
-  const title = (movieData && (movieData.title || movieData.name)) || `Show #${tmdbId}`;
-  const posterPath = movieData?.poster_path || null;
+  let title = (movieData && (movieData.title || movieData.name)) || `Show #${tmdbId}`;
+  let posterPath = movieData?.poster_path || null;
   const mediaType = movieData?.media_type || 'movie';
-  const releaseDate = movieData?.release_date || null;
-  const firstAirDate = movieData?.first_air_date || null;
+  let releaseDate = movieData?.release_date || null;
+  let firstAirDate = movieData?.first_air_date || null;
+
+  // If this call came from the importer (id + media_type only) or any other
+  // source that doesn't include a real title/poster, use TMDB to enrich the
+  // row before we persist it so Postgres has full show/movie details.
+  const needsEnrichment =
+    tmdbId &&
+    (!title || /^Show #\d+$/.test(title)) &&
+    !posterPath;
+
+  if (needsEnrichment) {
+    const tmdbDetails = await fetchTmdbDetails(tmdbId, mediaType);
+    if (tmdbDetails) {
+      title = tmdbDetails.title || tmdbDetails.name || title;
+      posterPath = tmdbDetails.poster_path || posterPath;
+      if (!releaseDate) {
+        releaseDate = tmdbDetails.release_date || null;
+      }
+      if (!firstAirDate) {
+        firstAirDate = tmdbDetails.first_air_date || null;
+      }
+    }
+  }
 
   // Always keep a single row per (user_list_id, tmdb_id). If the user re-adds
   // a show with a different media_type (e.g., fixing a TV vs movie mixup),
@@ -113,7 +188,7 @@ async function addShowToListDb(userId, listType, movieId, movieData) {
     [listId, tmdbId, mediaType, title, posterPath, releaseDate, firstAirDate]
   );
 
-  return { id: tmdbId, title, name: title, poster_path: posterPath };
+  return { id: tmdbId, title, name: title, poster_path: posterPath, media_type: mediaType };
 }
 
 async function removeShowFromListDb(userId, listType, showId) {

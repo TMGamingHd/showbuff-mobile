@@ -27,7 +27,6 @@ import SocialFeedScreen from './src/screens/SocialFeedScreen';
 import PostCreationModal from './src/components/PostCreationModal';
 import AuthScreen from './src/screens/AuthScreen';
 import ReviewWriteScreen from './src/screens/ReviewWriteScreen';
-import WatchlistScreen from './src/screens/WatchlistScreen';
 import MovieDetailScreen from './src/screens/MovieDetailScreen';
 import FriendsScreen from './src/screens/FriendsScreen';
 import FriendProfileScreen from './src/screens/FriendProfileScreen';
@@ -544,25 +543,14 @@ const MainApp = () => {
     const swipeThreshold = 50;
     const onHandlerStateChange = ({ nativeEvent }) => {
       if (nativeEvent.state === State.END) {
-        // Let Watchlist screen handle its own swipe logic for sub-tabs and edge navigation
-        if (tabName === 'Watchlist') return;
         const dx = nativeEvent.translationX;
         const currentIdx = tabOrder.indexOf(tabName);
         if (dx <= -swipeThreshold && currentIdx < tabOrder.length - 1) {
           const next = tabOrder[currentIdx + 1];
-          if (next === 'Watchlist') {
-            props.navigation.navigate('Watchlist', { initialSubTab: 'watchlist' });
-          } else {
-            props.navigation.navigate(next);
-          }
+          props.navigation.navigate(next);
         } else if (dx >= swipeThreshold && currentIdx > 0) {
           const prev = tabOrder[currentIdx - 1];
-          if (prev === 'Watchlist') {
-            // Coming from Friends -> Watchlist should land on 'watched'
-            props.navigation.navigate('Watchlist', { initialSubTab: 'watched' });
-          } else {
-            props.navigation.navigate(prev);
-          }
+          props.navigation.navigate(prev);
         }
       }
     };
@@ -579,7 +567,7 @@ const MainApp = () => {
   const TabNavigator = () => {
     const insets = useSafeAreaInsets();
     const bottom = insets?.bottom || 0;
-    const tabOrder = ['Home', 'Search', 'Watchlist', 'Friends', 'Profile'];
+    const tabOrder = ['Home', 'Search', 'Friends', 'Profile'];
     return (
       <Tab.Navigator
         screenOptions={({ route }) => ({
@@ -598,8 +586,6 @@ const MainApp = () => {
               iconName = focused ? 'home' : 'home-outline';
             } else if (route.name === 'Search') {
               iconName = focused ? 'search' : 'search-outline';
-            } else if (route.name === 'Watchlist') {
-              iconName = focused ? 'bookmark' : 'bookmark-outline';
             } else if (route.name === 'Friends') {
               iconName = focused ? 'people' : 'people-outline';
             } else if (route.name === 'Profile') {
@@ -615,7 +601,6 @@ const MainApp = () => {
       >
         <Tab.Screen name="Home" component={withSwipe(SocialFeedScreen, tabOrder, 'Home')} />
         <Tab.Screen name="Search" component={withSwipe(SearchScreen, tabOrder, 'Search')} />
-        <Tab.Screen name="Watchlist" component={withSwipe(WatchlistScreen, tabOrder, 'Watchlist')} />
         <Tab.Screen name="Friends" component={withSwipe(FriendsScreen, tabOrder, 'Friends')} />
         <Tab.Screen name="Profile" component={withSwipe(ProfileScreen, tabOrder, 'Profile')} />
       </Tab.Navigator>

@@ -352,11 +352,18 @@ const ProfileScreen = ({ navigation }) => {
   const renderMovieItem = ({ item: movie }) => {
     // Find user review for this movie from reviews array
     const userReview = reviews.find(review => review.movieId === movie.id || review.showId === movie.id);
+    const isTv = movie.media_type === 'tv' || movie.type === 'tv';
+    const displayTitle = isTv ? (movie.name || movie.title) : (movie.title || movie.name);
 
     return (
       <TouchableOpacity
         style={styles.movieItem}
         onPress={() => {
+          // Navigate to detail screen for both movies and TV shows, preserving media_type
+          navigation.navigate('MovieDetail', { movie });
+        }}
+        onLongPress={() => {
+          // Keep existing action sheet behavior on long press
           setSelectedMovie(movie);
           setActionModalVisible(true);
         }}
@@ -369,7 +376,7 @@ const ProfileScreen = ({ navigation }) => {
         />
         <View style={styles.movieInfo}>
           <Text style={styles.movieTitle} numberOfLines={2}>
-            {movie.title || movie.name}
+            {displayTitle}
           </Text>
           <Text style={styles.movieYear}>
             {TMDBService.getYear(movie.release_date || movie.first_air_date)}

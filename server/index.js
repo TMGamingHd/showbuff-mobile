@@ -340,6 +340,56 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// Remove a movie from a specific list
+app.post('/api/user/remove-from-list', requireAuth, async (req, res) => {
+  const { movieId, listType } = req.body || {};
+  if (!listType) {
+    return res.status(400).json({ message: 'listType required' });
+  }
+
+  try {
+    const normalized = normalizeListType(listType);
+
+    // Try to fetch the show before removal so we can log a meaningful activity
+    let show = null;
+    try {
+      show = await findShowForUser(req.userId, movieId);
+    } catch (e) {
+      // Non-fatal; continue with removal
+      console.warn('findShowForUser failed before removal:', e);
+    }
+
+    await removeShowFromListDb(req.userId, normalized, movieId);
+
+    if (show) {
+      const action =
+        normalized === 'watchlist'
+          ? 'removed_from_watchlist'
+          : normalized === 'currently-watching'
+          ? 'removed_from_currentlywatching'
+          : 'removed_from_watched';
+
+      await pool.query(
+        `INSERT INTO activities (user_id, type, action, tmdb_id, media_type, movie_title, movie_poster, visibility)
+         VALUES ($1, 'list', $2, $3, $4, $5, $6, 'friends')`,
+        [
+          req.userId,
+          action,
+          show.id,
+          'movie',
+          show.title || 'Unknown Movie',
+          show.poster_path || null,
+        ]
+      );
+    }
+
+    return res.json({ success: true, list: normalized });
+  } catch (err) {
+    console.error('Error removing from list:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
 // Internal endpoint used by the importer backend to apply bulk list updates
 // for a specific user. Protected by the INTERNAL_SERVICE_TOKEN shared secret.
 //

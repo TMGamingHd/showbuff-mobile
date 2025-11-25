@@ -40,32 +40,68 @@ const ImportReviewScreen = ({ route, navigation }) => {
     navigation.setOptions?.({ headerShown: false });
   }, [navigation]);
 
+  // Load import details and poll until the importer session has populated titles
+  // or reached a completed status. This guards against the race where we
+  // navigate into this screen before the Celery task has finished.
   useEffect(() => {
     let isMounted = true;
+    let pollTimeout = null;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 15; // ~30s if interval is 2s
 
-    const loadDetails = async () => {
+    const fetchDetails = async (isInitial = false) => {
       if (!importId) {
         setError('Missing import id');
         setLoading(false);
         return;
       }
+
       try {
-        setLoading(true);
+        if (isInitial) {
+          setLoading(true);
+        }
+
         const data = await ImporterService.getImportDetails(importId);
         if (!isMounted) return;
+
+        console.log('[ImportReview] details for', importId, data);
         setDetails(data);
+
+        const titles = Array.isArray(data?.titles) ? data.titles : [];
+        const status = data?.status || '';
+
+        const shouldPoll =
+          attempts < MAX_ATTEMPTS &&
+          titles.length === 0 &&
+          status && status.toLowerCase() !== 'completed';
+
+        if (shouldPoll) {
+          attempts += 1;
+          pollTimeout = setTimeout(() => {
+            fetchDetails(false);
+          }, 2000);
+        } else {
+          setLoading(false);
+        }
       } catch (e) {
         console.error('Failed to load import details', e);
         if (!isMounted) return;
-        setError(e?.message || 'Failed to load import');
-      } finally {
-        if (isMounted) setLoading(false);
+        // Only surface the error on the initial load; later polls can fail
+        // silently and the user can retry by restarting the flow.
+        if (attempts === 0) {
+          setError(e?.message || 'Failed to load import');
+          setLoading(false);
+        }
       }
     };
 
-    loadDetails();
+    fetchDetails(true);
+
     return () => {
       isMounted = false;
+      if (pollTimeout) {
+        clearTimeout(pollTimeout);
+      }
     };
   }, [importId]);
 

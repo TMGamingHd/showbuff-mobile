@@ -344,23 +344,13 @@ class BackendService {
   }
 
   async removeFromList(showId, listType) {
-    let endpoint;
-    switch (listType) {
-      case 'watchlist':
-        endpoint = `/user/remove-from-watchlist`;
-        break;
-      case 'currently_watching':
-        endpoint = `/user/remove-from-currently-watching`;
-        break;
-      case 'watched':
-        endpoint = `/user/remove-from-watched`;
-        break;
-      default:
-        endpoint = `/user/remove-from-watchlist`;
-    }
-    return await this.makeRequest(endpoint, {
+    // Normalize list type to backend format (hyphenated) so it matches
+    // the Postgres-backed lists used by /api/user/* endpoints.
+    const normalized = String(listType || 'watchlist').replace(/_/g, '-');
+
+    return await this.makeRequest('/user/remove-from-list', {
       method: 'POST',
-      body: JSON.stringify({ showId }),
+      body: JSON.stringify({ movieId: showId, listType: normalized }),
     });
   }
 
